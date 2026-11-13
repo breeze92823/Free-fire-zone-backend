@@ -61,11 +61,18 @@ export const MODES: Record<string, { name: string; duration: number; scoreToWin:
   clash: { name: "Team Clash", duration: 240, scoreToWin: 45 },
   squad: { name: "Squad Showdown", duration: 180, scoreToWin: 25 },
 };
-export const MAP_COUNT = 3; // client MAPS: day, sunset, night
+// The voted maps (client MAPS, same order): a district of Coral Key + a time of day. The safe zone
+// closes in on the map's district (zone.ts), so each map plays out somewhere else on the island.
+export const MAP_FOCUS: [number, number][] = [
+  [0, 0], // The Villa · day
+  [-66, 34], // Old Farm · sunset
+  [-98, -14], // Dockyard · night
+];
+export const MAP_COUNT = MAP_FOCUS.length;
 
 // Round phases, seconds each (playing lasts the mode's duration).
 export const PHASES = {
-  vote: 8,
+  vote: 15, // client MATCH.voteTime
   intro: 3.2,
   countdown: 4,
   ending: 2.4,

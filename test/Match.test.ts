@@ -172,7 +172,7 @@ describe("match room", () => {
   it("verifies the token, uses only the verified id, and carries a guest save into a new account", async () => {
     const db = fakePlayers([{ _id: "guest-old", coins: 4321, updatedAt: new Date() } as any]);
     __setPlayersForTest(db);
-    __setVerifierForTest(async (token) => (token === "good-token-123" ? { userId: "acct1", username: "RealName", pfp: "", carriedFrom: ["guest-old"] } : null));
+    __setVerifierForTest(async (token) => (token === "good-token-123" ? { userId: "acct1", username: "RealName", pfp: "", carriedFrom: ["guest-old"], outfitKey: "o1-verified" } : null));
     const room = await colyseus.createRoom<MatchState>("match", {});
     const a = await colyseus.connectTo(room, { token: "good-token-123", name: "Spoofed", userId: "someone-else" });
     const profiles: any[] = [];
@@ -182,6 +182,13 @@ describe("match room", () => {
     const p = room.state.players.get(a.sessionId)!;
     assert.strictEqual(p.name, "RealName");
     assert.strictEqual(p.signedIn, true);
+    assert.strictEqual(p.outfitKey, "o1-verified", "the verified look is relayed");
+    a.send("avatar", { avatar: '{"equipped":{"hatId":"12","characterId":"-1"}}', outfitKey: "o1-new" });
+    await until(() => p.outfitKey === "o1-new", 1000, "look update");
+    assert.ok(p.avatar.includes("characterId"));
+    a.send("avatar", { outfitKey: "bad key <script>" });
+    await sleep(60);
+    assert.strictEqual(p.outfitKey, "o1-new", "a malformed key is ignored");
     assert.strictEqual(profiles[0].userId, "acct1");
     assert.strictEqual(profiles[0].profile.coins, 4321, "guest progress carried over");
     assert.strictEqual(db.docs.get("guest-old").carried, true, "only once");

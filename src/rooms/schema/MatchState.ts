@@ -12,7 +12,8 @@ export const PlayerState = schema(
     pfp: t.string().default(""), // Bloxity profile picture URL, "" = none
     signedIn: t.boolean().default(false),
     uid: t.string().default(""), // verified Bloxity user id ("" = guest): matches chat messages' userId
-    avatar: t.string().default(""), // Bloxity look JSON { equipped (ids only), proportions }, "" = default
+    avatar: t.string().default(""), // Bloxity look JSON { equipped (ids only, incl. characterId), proportions, outfitKey }, "" = default
+    outfitKey: t.string().default(""), // Bloxity outfit key: verified by Bloxity at join, then the player's own updates
     party: t.string().default(""), // Bloxity party room key: party members share a team
 
     inMatch: t.boolean().default(false), // pressed Play (in the round or waiting for one)

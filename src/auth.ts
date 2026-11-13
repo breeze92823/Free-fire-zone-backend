@@ -8,7 +8,11 @@ export interface Identity {
   username: string;
   pfp: string;
   carriedFrom: string[]; // guest ids this browser played as before signing in (up to 5)
+  outfitKey?: string; // the player's look as Bloxity verified it (character kit key)
 }
+
+// Bloxity outfit keys (character kit): short url-safe strings.
+export const OUTFIT_KEY = /^[A-Za-z0-9_.~-]{1,256}$/;
 
 export const GAME_SLUG = process.env.BLOXITY_GAME_ID || "free-fire-zone";
 export const apiUrl = () => (process.env.BLOXITY_API_URL || "https://api.bloxity.io").replace(/\/$/, "");
@@ -33,6 +37,7 @@ async function verifyWithBloxity(token: string): Promise<Omit<Identity, "verifie
       username: String(u.displayName || u.username || "Player"),
       pfp: typeof u.pfp === "string" ? u.pfp : "",
       carriedFrom: Array.isArray(json.carriedFrom) ? json.carriedFrom.filter((x: unknown) => typeof x === "string").slice(0, 5) : [],
+      outfitKey: typeof u.outfitKey === "string" && OUTFIT_KEY.test(u.outfitKey) ? u.outfitKey : "",
     };
   } catch (err) {
     console.warn("[auth] verify failed", (err as Error)?.message ?? err);

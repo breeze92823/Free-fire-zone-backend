@@ -2,7 +2,8 @@ import { ISLAND_RADIUS, ZONE } from "./rules.js";
 
 // The safe zone on the round clock, from the round's seed. The client (src/game/zone.js) runs the
 // same planner with the same seeded random numbers, so both agree on every circle without the
-// server streaming it. Two random numbers per phase, in this order: angle, distance.
+// server streaming it. Two random numbers per phase, in this order: angle, distance. Each circle
+// heads for the voted map's district (focus), jittered around it, never leaving the last circle.
 
 export function mulberry32(seed: number): () => number {
   let a = seed >>> 0;
@@ -30,8 +31,13 @@ export class Zone {
   damage = ZONE.damage[0];
   private rand: () => number;
 
-  constructor(seed: number) {
+  private focusX: number;
+  private focusZ: number;
+
+  constructor(seed: number, focus: [number, number] = [0, 0]) {
     this.rand = mulberry32(seed);
+    this.focusX = focus[0];
+    this.focusZ = focus[1];
     this.planNext(0);
   }
 
@@ -39,9 +45,13 @@ export class Zone {
     const p = ZONE.phases[i];
     const slack = Math.max(0, this.radius - p.radius);
     const a = this.rand() * Math.PI * 2;
-    const d = Math.sqrt(this.rand()) * slack * 0.85;
-    let x = this.cx + Math.cos(a) * d;
-    let z = this.cz + Math.sin(a) * d;
+    const j = Math.sqrt(this.rand()) * p.radius * 0.45;
+    const tx = this.focusX + Math.cos(a) * j - this.cx;
+    const tz = this.focusZ + Math.sin(a) * j - this.cz;
+    const len0 = Math.hypot(tx, tz);
+    const d = Math.min(len0, slack * 0.85);
+    let x = this.cx + (len0 > 0 ? (tx / len0) * d : 0);
+    let z = this.cz + (len0 > 0 ? (tz / len0) * d : 0);
     const maxC = Math.max(0, ISLAND_RADIUS - p.radius * 0.6);
     const len = Math.hypot(x, z);
     if (len > maxC && len > 0) {

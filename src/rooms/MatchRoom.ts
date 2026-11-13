@@ -6,13 +6,13 @@ import {
   PFP_MAX_LEN, RANGE_SLACK, RECONNECT_SECONDS, RESPAWN_MIN_S, REPLACED_CODE, ROOM_MAX_CLIENTS, SHOT_POINTS_MAX, TEAM_MAX, TICK_MS, TIMING, WORLD_BOUND,
 } from "../constants.js";
 import {
-  ASSIST_WINDOW, HEALTH, ITEMS, JIN_HEAL, LOOT, MAP_COUNT, MODES, OPERATIVES, PHASES, REWARDS, ROOK_DAMAGE_TAKEN, STREAK_WINDOW,
+  ASSIST_WINDOW, HEALTH, ITEMS, JIN_HEAL, LOOT, MAP_COUNT, MAP_FOCUS, MODES, OPERATIVES, PHASES, REWARDS, ROOK_DAMAGE_TAKEN, STREAK_WINDOW,
   ULT_MIN_GAP_S, WEAPONS, damageFalloff,
 } from "../rules.js";
 import { Zone } from "../zone.js";
 import { buy, equip, normalizeProfile, skinFor, type Profile } from "../catalog.js";
 import { loadProfile, saveProfile } from "../db.js";
-import { reportId, verifyToken, type Identity } from "../auth.js";
+import { OUTFIT_KEY, reportId, verifyToken, type Identity } from "../auth.js";
 import { flushReports, queueScores, queueStats } from "../reporters.js";
 
 type Team = "blue" | "orange";
@@ -125,9 +125,12 @@ export class MatchRoom extends Room<{ state: MatchState }> {
       if (slot !== null) p.slot = clampN(Math.floor(slot), 0, 3);
       if (p.emote && p.speed > 1.2) p.emote = "";
     },
-    avatar: (client: Client, msg: { avatar?: unknown }) => {
+    // The player's Bloxity look for the others to draw: { avatar: JSON of ids (never URLs), outfitKey }.
+    avatar: (client: Client, msg: { avatar?: unknown; outfitKey?: unknown }) => {
       const p = this.player(client);
-      if (p && typeof msg?.avatar === "string" && msg.avatar.length <= AVATAR_MAX_LEN) p.avatar = msg.avatar;
+      if (!p) return;
+      if (typeof msg?.avatar === "string" && msg.avatar.length <= AVATAR_MAX_LEN) p.avatar = msg.avatar;
+      if (typeof msg?.outfitKey === "string" && (msg.outfitKey === "" || OUTFIT_KEY.test(msg.outfitKey))) p.outfitKey = msg.outfitKey;
     },
     emote: (client: Client, msg: { emote?: unknown }) => {
       const p = this.player(client);
@@ -161,6 +164,7 @@ export class MatchRoom extends Room<{ state: MatchState }> {
       p.pfp = pfpOk(identity.pfp) || p.pfp;
       p.signedIn = identity.verified;
       p.uid = identity.verified ? identity.userId : "";
+      if (identity.outfitKey) p.outfitKey = identity.outfitKey;
       this.evictOthers(client.sessionId, identity);
       void this.loadSession(client, s);
     },
@@ -352,6 +356,9 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     p.pfp = pfpOk(auth.pfp) || pfpOk(options?.pfp);
     p.signedIn = auth.verified;
     p.uid = auth.verified ? auth.userId : "";
+    // The verified outfit key wins over the one in the join options.
+    if (auth.outfitKey) p.outfitKey = auth.outfitKey;
+    else if (typeof options?.outfitKey === "string" && OUTFIT_KEY.test(options.outfitKey)) p.outfitKey = options.outfitKey;
     if (typeof options?.avatar === "string" && options.avatar.length <= AVATAR_MAX_LEN) p.avatar = options.avatar;
     p.party = str(options?.party, PARTY_MAX_LEN);
     p.life = "dead";
@@ -634,7 +641,7 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     st.blue = st.orange = 0;
     st.winner = "";
     st.zoneSeed = (Math.random() * 0xffffffff) >>> 0;
-    this.zone = new Zone(st.zoneSeed);
+    this.zone = new Zone(st.zoneSeed, MAP_FOCUS[st.map]);
     st.crates.clear();
     st.drops.clear();
     this.nextDrop = 0;
