@@ -1,8 +1,8 @@
 {
   "private": true,
-  "name": "bowling-roll-server",
+  "name": "free-fire-zone-server",
   "version": "0.1.0",
-  "description": "Colyseus server for Bowling Roll: progress saving and the room roster",
+  "description": "Colyseus game server for Free Fire Zone: online team rounds, hit checks, saves and the coin shop",
   "type": "module",
   "main": "build/index.js",
   "engines": {

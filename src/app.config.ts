@@ -1,16 +1,17 @@
 import cors from "cors";
 import { defineServer, defineRoom, monitor, playground, WebSocketTransport } from "colyseus";
 
-import { WorldRoom } from "./rooms/WorldRoom.js";
+import { MatchRoom } from "./rooms/MatchRoom.js";
 import { MAX_PAYLOAD_BYTES } from "./constants.js";
 
 const server = defineServer({
-  // saveProgress carries the owned boats/engines/trails/pets, over the default 4 KB message cap.
   transport: new WebSocketTransport({ maxPayload: MAX_PAYLOAD_BYTES }),
 
   rooms: {
-    // The client calls joinOrCreate("world", ...). Progress is shared across rooms via Mongo.
-    world: defineRoom(WorldRoom),
+    // The client calls joinOrCreate("match", { token, name, pfp, avatar, party }) through the
+    // Bloxity matchmaker endpoint (resolveEndpoint), joinById for invites / Open Rooms, and
+    // create("match", { private: true }) for Play with friends.
+    match: defineRoom(MatchRoom),
   },
 
   express: (app) => {
