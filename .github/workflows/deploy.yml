@@ -85,8 +85,8 @@ jobs:
       # per https://docs.bloxity.io the deploy must send roomSize, never seatCap (Bloxity sizes the pods).
       - name: Deploy to Legion
         run: |
-          ROOM_SIZE=$(grep -oP 'ROOM_MAX_CLIENTS\s*=\s*\K\d+' src/constants.ts)
-          if [ -z "${ROOM_SIZE}" ]; then
+          ROOM_SIZE=$(grep -m1 -oP '^export const ROOM_MAX_CLIENTS\s*=\s*\K\d+' src/constants.ts)
+          if ! [[ "${ROOM_SIZE}" =~ ^[0-9]+$ ]]; then
             echo "::error::Could not read ROOM_MAX_CLIENTS from src/constants.ts."
             exit 1
           fi

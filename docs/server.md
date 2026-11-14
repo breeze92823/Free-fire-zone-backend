@@ -53,7 +53,7 @@ Node `>= 22` (`package.json` `engines`; Docker and CI use Node 22). The package 
 - Triggers: push and pull request on `dev` and `main`, plus manual `workflow_dispatch`.
 - Job `test` (always): Node 22, `npm ci`, `npm run build`, `npm test`.
 - Job `deploy` (not on pull requests, needs `test`): channel is `prod` when the ref is `main`, otherwise `dev`. Builds and pushes `ghcr.io/<owner>/<game id>-server:<channel>-<sha>`, then `POST https://legion.bloxity.io/v1/apps/<game id>/deploy` with `{ channel, image, version: <sha>, roomSize }`. The step prints the request body and Legion's HTTP status + response body (no `curl -f`, which would hide the reason for a 4xx) and fails on any non-2xx.
-- `roomSize` is read from `src/constants.ts` with `grep -oP 'ROOM_MAX_CLIENTS\s*=\s*\K\d+'`: keep that constant a literal integer on its own assignment. The workflow sends `roomSize`, never `seatCap`.
+- `roomSize` is read from `src/constants.ts` with `grep -m1 -oP '^export const ROOM_MAX_CLIENTS\s*=\s*\K\d+'`: keep that constant a literal integer on its own `export const` line (the grep is anchored so a comment mentioning the name cannot match: a second match makes the JSON body invalid and Legion answers 400). The workflow sends `roomSize`, never `seatCap`.
 - Required repo config: variable or secret `LEGION_GAME_ID` (`free-fire-zone`) and secret `LEGION_DEPLOY_TOKEN`. The job fails early if either is missing.
 
 ## 3. Source files

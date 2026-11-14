@@ -4,7 +4,7 @@
 // Kept equal to a round's seats (2 x TEAM_MAX) so nobody waits in a queue: when a room is full the
 // matchmaker sends the next player to another room. Keep it a literal integer (the deploy greps it).
 export const ROOM_MAX_CLIENTS = 6;
-// Players per side in a round; a round seats MATCH_MAX = 2 x TEAM_MAX (6). With ROOM_MAX_CLIENTS = 6
+// Players per side in a round; a round seats MATCH_MAX = 2 x TEAM_MAX (6). With a room of 6
 // everyone fits; if the room is ever larger, players who pressed Play beyond the seats wait in the
 // queue for the next round (those who sat out go first).
 export const TEAM_MAX = 3;
