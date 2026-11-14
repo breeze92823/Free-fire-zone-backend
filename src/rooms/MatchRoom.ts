@@ -93,6 +93,7 @@ export class MatchRoom extends Room<{ state: MatchState }> {
   private invites = new Map<number, Invite>();
   private inviteSeq = 1;
   private squadSeq = 1;
+  private forfeit = false; // this round ended because a side left (checkTeams)
 
   messages = {
     // --- Lobby -----------------------------------------------------------------------------------
@@ -873,18 +874,39 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     this.resetForRound(sessionId, p, s);
   }
 
+  // Out of the round and back to the menus (the `leave` message, or a disconnect whose reconnect
+  // window ran out). Leaving once the fight has started costs the round reward; leaving before it
+  // (vote, intro, countdown) costs nothing.
   private leaveMatch(sessionId: string) {
     const p = this.state.players.get(sessionId);
     const s = this.sessions.get(sessionId);
     if (!p || !s || !p.inMatch) return;
-    if (p.team && RUNNING.has(this.state.phase) && s.playedRound === this.state.round) {
+    const team = p.team;
+    const seated = !!team && s.playedRound === this.state.round;
+    const fought = seated && this.state.phase === "playing";
+    if (seated && this.state.phase === "ending") {
+      // The round is already decided: the player gets its normal rewards now instead of at the results.
+      this.grant(sessionId, s, this.rewardsFor(sessionId, p, this.mvpId()), true);
+      void this.persist(sessionId);
+    }
+    if (fought && p.life !== "dead") {
+      // Leaving never denies a kill: a knocked player, or one an enemy hit in the last
+      // ASSIST_WINDOW seconds, is eliminated and credited to that enemy first.
+      const hitAt = s.lastHitBy ? s.damagers.get(s.lastHitBy) : undefined;
+      const recent = hitAt !== undefined && this.state.clock - hitAt <= ASSIST_WINDOW;
+      if (p.life === "knocked" || recent) this.eliminate(sessionId, s.lastHitBy || null, {});
+    }
+    if (fought) {
       const r = this.rewardsFor(sessionId, p, null);
-      // Half of what the player earned by fighting; no participation coins (join-and-leave farming).
-      r.coins = Math.max(0, Math.round((r.coins - REWARDS.loss) * 0.5));
-      r.rp = Math.min(r.rp, REWARDS.leavePenaltyRp);
-      r.gems -= r.gemsRound; // no round Gems for leaving (the kills' Gems stay)
+      // Half of what the player earned by fighting; no result bonus (win or participation) and no
+      // round Gems (the Gems already granted for knocks and eliminations stay).
+      const result = r.won ? REWARDS.win : REWARDS.loss;
+      r.coins = Math.max(0, Math.round((r.coins - result) * 0.5));
+      r.rp = REWARDS.leavePenaltyRp;
+      r.gems -= r.gemsRound;
       r.gemsRound = 0;
       r.won = false;
+      r.left = true;
       this.grant(sessionId, s, r, false);
       void this.persist(sessionId);
     }
@@ -895,6 +917,10 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     p.vote = -1;
     p.emote = "";
     s.playedRound = -1;
+    s.throws = 0; // a grenade still in the air no longer counts
+    s.reviving = null;
+    // Teammates left knocked with nobody standing are out, as when the last one standing falls.
+    if (team && this.fighting()) this.checkWipe(team);
     this.checkTeams();
   }
 
@@ -933,6 +959,7 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     st.clock = 0;
     st.blue = st.orange = 0;
     st.winner = "";
+    this.forfeit = false;
     st.zoneSeed = (Math.random() * 0xffffffff) >>> 0;
     this.zone = new Zone(st.zoneSeed, MAP_FOCUS[st.map]);
     st.crates.clear();
@@ -981,7 +1008,15 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     const live = { blue: 0, orange: 0 };
     for (const [, p] of this.inRound()) live[p.team as Team]++;
     if (live.blue && live.orange) return;
+    // The other side left: a forfeit. Early on it is a no contest (no win bonus, see rewardsFor), so
+    // a second tab that joins and leaves cannot farm wins.
+    this.forfeit = true;
     this.end(live.blue ? "blue" : live.orange ? "orange" : st.blue >= st.orange ? "blue" : "orange");
+  }
+
+  // The round ended because a side left before REWARDS.forfeitMinShare of it was played.
+  private noContest() {
+    return this.forfeit && this.state.clock < this.state.duration * REWARDS.forfeitMinShare;
   }
 
   private end(winner: Team) {
@@ -989,7 +1024,7 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     if (!RUNNING.has(st.phase) || st.phase === "ending") return;
     st.winner = winner;
     this.setPhase("ending", PHASES.ending);
-    this.broadcast("matchEnd", { winner });
+    this.broadcast("matchEnd", { winner, forfeit: this.forfeit, noContest: this.noContest() });
   }
 
   // --- Simulation -------------------------------------------------------------------------------------
@@ -1132,7 +1167,7 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     const a = this.state.players.get(sessionId);
     const s = this.sessions.get(sessionId);
     const g = GRENADES[s?.throwKind ?? "frag"] ?? GRENADES.frag;
-    if (!a || !s || !this.fighting() || s.throws <= 0 || Date.now() - s.lastThrowAt > (g.fuse + 3) * 1000) return;
+    if (!a || !s || !a.team || !this.fighting() || s.throws <= 0 || Date.now() - s.lastThrowAt > (g.fuse + 3) * 1000) return;
     const x = num(msg?.x), y = num(msg?.y), z = num(msg?.z);
     if (x === null || y === null || z === null || Math.hypot(x - a.x, z - a.z) > 60) return;
     s.throws--;
@@ -1291,15 +1326,20 @@ export class MatchRoom extends Room<{ state: MatchState }> {
   }
 
   private rewardsFor(sessionId: string, p: PlayerState, mvpId: string | null) {
-    const won = p.team === this.state.winner;
+    // A no contest (the other side left early) pays like a loss but costs no rank: nobody won it.
+    const noContest = this.noContest();
+    const won = p.team === this.state.winner && !noContest;
     const mvp = mvpId === sessionId;
     const coins = Math.round(p.kills * REWARDS.perElimination + p.knocks * REWARDS.perKnock + p.damage * REWARDS.perDamage + (won ? REWARDS.win : REWARDS.loss) + (mvp ? REWARDS.mvp : 0));
-    const rp = (won ? REWARDS.rpWin : REWARDS.rpLoss) + p.kills * REWARDS.rpPerElim;
+    const rp = (noContest ? 0 : won ? REWARDS.rpWin : REWARDS.rpLoss) + p.kills * REWARDS.rpPerElim;
     // Gems: the kills' share was granted kill by kill (reward); the round's share is granted here.
     const gemsRound = (won ? GEMS.win : GEMS.loss) + (mvp ? GEMS.mvp : 0);
     return {
       won,
       mvp,
+      left: false, // this player left the running round (the leave penalty)
+      forfeit: this.forfeit, // the round ended because a side left
+      noContest,
       coins,
       rp,
       gems: (this.sessions.get(sessionId)?.roundGems ?? 0) + gemsRound, // everything this round earned
@@ -1354,11 +1394,22 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     }
   }
 
+  // This round's participants (seated and still in it).
+  private participants() {
+    return this.inRound().filter(([sid]) => this.sessions.get(sid)?.playedRound === this.state.round);
+  }
+
+  // The participant with the most eliminations (then damage), if they have at least one. A no
+  // contest has no MVP.
+  private mvpId() {
+    if (this.noContest()) return null;
+    const sorted = this.participants().sort(([, a], [, b]) => b.kills - a.kills || b.damage - a.damage);
+    return sorted.length && sorted[0][1].kills > 0 ? sorted[0][0] : null;
+  }
+
   private finishRound() {
-    const st = this.state;
-    const round = this.inRound().filter(([sid]) => this.sessions.get(sid)?.playedRound === st.round);
-    const sorted = [...round].sort(([, a], [, b]) => b.kills - a.kills || b.damage - a.damage);
-    const mvpId = sorted.length && sorted[0][1].kills > 0 ? sorted[0][0] : null;
+    const round = this.participants();
+    const mvpId = this.mvpId();
     for (const [sid, p] of round) {
       const s = this.sessions.get(sid);
       if (!s) continue;

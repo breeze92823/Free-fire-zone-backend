@@ -127,7 +127,8 @@ export const REWARDS = {
   rpWin: 40,
   rpLoss: -12,
   rpPerElim: 3,
-  leavePenaltyRp: -12, // leaving a running round: half the coins and at least this rank loss
+  leavePenaltyRp: -12, // leaving a round in play: half the fighting coins and this rank change
+  forfeitMinShare: 0.5, // a side that leaves before this share of the round was played: a no contest (no win bonus)
 };
 
 // Gems: the game's own currency (NOT Bloxity Gems, not premium currency). Earned only by playing,

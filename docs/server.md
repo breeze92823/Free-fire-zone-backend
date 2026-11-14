@@ -23,7 +23,7 @@ Node `>= 22` (`package.json` `engines`; Docker and CI use Node 22). The package 
 | `npm start` | `tsx watch src/index.ts` | Dev server with reload, port 2567. `NODE_ENV` unset, so dev-only features are on (see below). |
 | `npm run build` | `rimraf build && tsc -p tsconfig.build.json` | Emits `build/` from `src/` only (`tsconfig.build.json` narrows `include`). |
 | `npm run clean` | `rimraf build` | |
-| `npm test` | `mocha -r tsx test/**.test.ts --exit --timeout 15000` | Runs against TypeScript directly; no build needed. 9 tests pass on the current code (about 9 s). |
+| `npm test` | `mocha -r tsx test/**.test.ts --exit --timeout 15000` | Runs against TypeScript directly; no build needed. 31 tests pass on the current code (about 27 s). |
 
 `tsconfig.json`: `strict: true` with `strictNullChecks: false`, `target: ESNext`, `outDir: build`, `allowJs`, `useDefineForClassFields: false`, `experimentalDecorators: true` (the schema uses the `schema()` builder, not decorators).
 
@@ -133,7 +133,7 @@ Extra rule fields: `melee` (a blow: melee range slack, never a headshot), `pierc
 - `STREAK_WINDOW` 6 s, `ASSIST_WINDOW` 10 s.
 - `ISLAND_RADIUS` 125; `ZONE`: `start` 150, `phases` `[{at 35, shrink 30, radius 105}, {at 95, shrink 30, radius 72}, {at 160, shrink 30, radius 46}]`, `damage` `[4, 7, 11]` HP per second outside.
 - `LOOT`: `crates` 200 (accepted crate indexes), `respawn` 40 s, `airdropAt` `[70, 150]`, `airdropFall` 9 s.
-- `REWARDS`: `perElimination` 12, `perKnock` 3, `perDamage` 1/25, `win` 70, `loss` 25, `mvp` 30, `rpWin` 40, `rpLoss` -12, `rpPerElim` 3, `leavePenaltyRp` -12.
+- `REWARDS`: `perElimination` 12, `perKnock` 3, `perDamage` 1/25, `win` 70, `loss` 25, `mvp` 30, `rpWin` 40, `rpLoss` -12, `rpPerElim` 3, `leavePenaltyRp` -12, `forfeitMinShare` 0.5 (a side that leaves before this share of the round's duration makes it a no contest). The client's `config.js REWARDS` mirrors these (its leave dialog quotes `leavePenaltyRp`).
 - `LEVEL` + `levelOf(stats)`: xp = matches x 20 + wins x 20 + eliminations x 10, level = 1 + floor(sqrt(xp / 50)), max 999 (state `level`). `REACTIONS`: the spectator reaction ids (`laugh`, `fire`, `clap`, `wow`, `gg`; client `config.js REACTIONS`).
 - `GEMS` (the game's own currency, not Bloxity Gems and not premium currency: earned only by playing, never sold; spent on weapons, grenades and passes): `perElimination` 12, `perKnock` 3, `headshot` +3 on a headshot elimination, `streak` +4 per elimination past the first in a streak, counted up to `streakCap` 5 (Double +4, Triple +8, ... +16); at the results `win` 40, `loss` 15, `mvp` 25. `GEMS_MAX` 1e9.
 
@@ -283,7 +283,7 @@ Helpers used everywhere: `player(client)`, `fighting()` (phase is `playing` or `
 - `onCreate(options)`: `options.private === true` calls `setPrivate(true)` (joinable by id only). Sets metadata `{ mode: 1, modeName: "Team Battle" }` (no `started` flag: Open Rooms shows started rooms as "Locked") and starts `tick` every `TICK_MS`.
 - `onAuth(client, options, context)`: token from `options.token` (or `context.token`) goes to `verifyToken`. Verified: returns the Bloxity identity with `verified: true, dev: false`. Otherwise a guest: `userId = guest_<sessionId>`, `username = options.name` (max 32) or `"Guest"`, `pfp` if a valid URL. Outside production, `options.devUser` matching `/^dev-[a-z0-9-]{4,40}$/` becomes the `userId` with `dev: true`. `onAuth` never rejects.
 - `onJoin(client, options, auth)`: creates the `PlayerState` (name, pfp, `signedIn`, `uid`, `outfitKey` (verified key wins over `options.outfitKey`), `avatar` from `options.avatar`, `party` from `options.party`, `life = "dead"`), creates the `Session` with a default profile and `graceUntil = now + TIMING.joinGraceMs`, calls `evictOthers`, then `loadSession` (async; answers with `profile`).
-- `onLeave(client, code)`: any code other than `CloseCode.CONSENTED` first awaits `allowReconnection(client, RECONNECT_SECONDS)`. On reconnect: `graceUntil = now + 3000`, `profile` is re-sent, the player keeps team, life and stats. On timeout or a consented leave: `leaveMatch` (penalty if applicable), `persist`, then the player and session are deleted. During the 20 s window the player stays in the state and in the round.
+- `onLeave(client, code)`: any code other than `CloseCode.CONSENTED` first awaits `allowReconnection(client, RECONNECT_SECONDS)`. On reconnect: `graceUntil = now + 3000`, `profile` is re-sent, the player keeps team, life and stats. On timeout or a consented leave: `leaveMatch` (kill credit and penalty if applicable, 5.4), `persist`, then the player and session are deleted. During the 20 s window the player stays in the state and in the round (standing still, and can be hit).
 - `onDispose()`: `await flushReports()`. Rooms auto-dispose when empty (Colyseus default).
 
 ### 5.3 Round phase machine
@@ -315,7 +315,13 @@ Helpers used everywhere: `player(client)`, `fighting()` (phase is `playing` or `
 - Squad (lobby team, the "Players online" invites): any player can `invite` another who is not `inMatch` and not in a squad; the target answers with `inviteReply`; accepting creates the inviter's squad (`squad` = `s<n>`, inviter `squadLead`) or joins it, up to `SQUAD_MAX`. Pending invites live in `MatchRoom.invites` (expire after `INVITE_TTL_S`; dropped when either side queues or leaves). Only the leader's `play` works and it queues every member (`play` for a squad); a leaver or a disconnect goes through `removeFromSquad` (lead passes on, a squad of one dissolves); the leader can `kick` while nobody is `inMatch`. The squad survives rounds (it is a lobby team). All outcomes the players see are `squadNote` messages (protocol.md section 4); tests in `test/Squad.test.ts`.
 - Mid-round join: `play` during a `RUNNING` phase calls `joinRound` -> `pickTeam` + `resetForRound` (when `pickTeam` returns `""` both sides are full: the player stays `inMatch` with no team and waits for the next round) (a `first` spawn: full health, upgrade armour, no spawn protection). The client places itself in its team's start area. This includes `intro`, `countdown` and `ending`.
 - `play` in `waiting`, `vote` or `results` only sets `inMatch` (and `voteMode`); the player is seated at the next `startRound`.
-- `leaveMatch(sessionId)` (message `leave`, or a final disconnect): if the player has a team, the phase is `RUNNING` and `playedRound === round`, the leave penalty is granted (section 5.10). Then `inMatch = false`, `team = ""`, `life = "dead"`, `vote = -1`, emote cleared, `playedRound = -1`, and `checkTeams()`.
+- `leaveMatch(sessionId)` (message `leave`, or a disconnect whose reconnect window ran out), for a player seated this round (`team` set, `playedRound === round`):
+  - `playing`: leaving never denies a kill. A `knocked` player, or an `alive` one whom an enemy (`lastHitBy`) damaged within `ASSIST_WINDOW` (10 s, from `damagers`), is first `eliminate`d and credited to that enemy (kill, score point, `reward`). Then the leave penalty (section 5.10).
+  - `ending`: the round is decided, so the player gets their normal rewards at once (`grant(..., finished = true)`, MVP from `mvpId()`).
+  - `vote`, `intro`, `countdown`: nothing is granted or counted (no fight happened).
+  - Then, always: `inMatch = false`, `team = ""`, `life = "dead"`, `watch = ""`, `vote = -1`, emote cleared, `playedRound = -1`, `throws = 0` (a grenade in the air no longer counts; `onBoom` also needs a team), `reviving = null`; in `playing` / `ending` `checkWipe(old team)` (knocked teammates with nobody standing are out, credited to their knocker); `checkTeams()`.
+  - `checkTeams()` ending a round because a side is empty sets `forfeit`; `noContest()` = `forfeit` and `clock < duration * REWARDS.forfeitMinShare`. `forfeit` is reset in `startRound`.
+  - Tests: `test/Leave.test.ts`.
 
 ### 5.5 Server tick (`simulate`, in `playing` and `ending`)
 
@@ -389,7 +395,9 @@ Not checked: line of sight, aim direction, ammo, reload, and that `t` was hit by
 - `rewardsFor(sessionId, p, mvpId)`: `won = p.team === state.winner`; `coins = round(kills * 12 + knocks * 3 + damage / 25 + (won ? 70 : 25) + (mvp ? 30 : 0))`; `rp = (won ? 40 : -12) + kills * 3`; `gemsRound` (the round's Gems, granted by `grant`), `gems = roundGems + gemsRound` (everything the round earned, for the results screen); plus the round's stats and final score.
 - `finishRound()`: participants are players in the round with `playedRound === round`. MVP is the participant with the most kills (then damage) if they have at least one kill. Each gets `grant`, then `persist`. Then phase `results` and `flushReports()`.
 - `grant(sessionId, s, r, finished)`: adds coins, `rp = max(0, rp + r.rp)`, `stats.matches++`, `wins`, `eliminations`, `deaths`, `damage`, `best`; counts the round into the missions (`countRound`; `play` / `win` only when `finished`, i.e. not when leaving) and pays new ranks (`payRankUps`); sends `rewards` (with `missions` and `rankUp`) and `profile`; for verified identities queues leaderboard scores (`eliminations`, `weekly_elims`, `best_match`, `wins`) and stats.
-- Leaving a running round (`leaveMatch`): `rewardsFor` with no MVP, then `coins = max(0, round((coins - REWARDS.loss) * 0.5))`, `rp = min(rp, REWARDS.leavePenaltyRp)` (always -12 with the current numbers), `won = false`; granted and persisted at once. The match still counts in `stats.matches`.
+- Leaving a round in `playing` (`leaveMatch`): `rewardsFor` with no MVP, then `coins = max(0, round((coins - result bonus) * 0.5))` (half of the fighting coins: the win or loss bonus that `rewardsFor` included is removed first), `rp = REWARDS.leavePenaltyRp`, no round Gems (`gemsRound = 0`; the Gems already granted kill by kill stay), `won = false`, `left = true`; granted (`finished = false`, so `play` / `win` missions skip it) and persisted at once. The match still counts in `stats.matches`. The client shows it as a lobby toast.
+- Forfeits: a round that ends because a side left (`checkTeams`) is flagged `forfeit` in `matchEnd` and `rewards`. Before `REWARDS.forfeitMinShare` (half) of the round's duration it is a **no contest** (`noContest`): `rewardsFor` sets `won = false` for everyone, pays the loss bonus (`REWARDS.loss`, `GEMS.loss`), no rank change from the result (kills still add `rpPerElim`), no MVP, and `grant` counts no win (stats, `wins` leaderboard, missions). Later it is a normal win for the side that stayed. This stops a second tab from farming wins by joining and leaving.
+- `rewardsFor` returns `left`, `forfeit` and `noContest` too (sent in `rewards`). `participants()` = seated players of this round still in it; `mvpId()` = the top participant with at least one elimination (null in a no contest).
 
 ### 5.11 Shop and profile persistence
 
@@ -467,6 +475,7 @@ All best-effort; failures are logged or swallowed, never thrown into the room.
 | Gem shop: weapons, grenades and the pass cost Gems... | a weapon bought with Gems, the pass and a grenade refused when short, coins untouched, the pass unlocking its set, an unowned grenade refused by `equip` |
 | a medic weapon heals a teammate... | the Mender stings an enemy, heals a teammate, and a normal gun still does no friendly damage |
 | spectating: the eliminated player watches someone... | `spectate` refused while alive; after the elimination: a heart before watching is ignored, `spectate` sets `watch`, a second heart within 400 ms is dropped, `heart` / `react` broadcasts, an unknown reaction is ignored, `playerProfile` answers, and a respawn clears `watch` |
+| `Leave.test.ts` | leaving a round: a player hit just before leaving is eliminated and credited to the shooter, the leaver's penalty (`left`, -12 rp, no coins without fighting), an early forfeit is a no contest (no win, no rank loss, loss coins); a late forfeit pays the win; a knocked leaver is credited to the knocker (point, `reward`); the last one standing leaving wipes knocked teammates; leaving in the countdown costs nothing and is not a match; a grenade thrown before leaving does no damage |
 | `Progress.test.ts` | missions and rank rewards: unit tests of `progress.ts`, and a round that finishes missions and a rank, then a claim and `tutorialDone` |
 | verifies the token... | faked verifier, spoofed name/id ignored, verified `outfitKey`, `avatar` updates and validation, guest carry-over, refused token = guest |
 
@@ -543,11 +552,12 @@ Items marked (reproduced) were confirmed by running a throwaway test against the
 - No message rate limit: Colyseus `maxMessagesPerSecond` defaults to `Infinity` (checked in the installed `@colyseus/core` 0.18.23) and the room does not set it. `shot`, `pose`, `avatar`, `emote`, `getProfile` have no per-message throttle.
 
 **Rounds and rewards**
-- (reproduced) A side left without players forfeits at any time, including `intro`: the remaining player received `won: true`, 70 coins, +40 rp with the clock at 0. A guest in a second tab can be the opponent, so wins (coins, rp, the `wins` leaderboard) can be farmed roughly every half minute.
+- Fixed 2026-11-14: a side left without players used to pay a full win at any time (farmable with a second guest tab). A forfeit before half the round is now a no contest (5.10). A forfeit after that still pays the win, so farming needs at least half a round each time.
 - `play` during `ending` seats the player and `finishRound` pays them a full win or loss.
 - Eliminations with no enemy killer (zone, fall, own frag) give the other team a point. Eliminations during `ending` count for coins, rp and MVP but not the team score.
 - Attacker `damage` (which pays coins) counts overkill and damage to knocked players.
-- Leaving during `ending` on the winning side computes the penalty from a total that included the win bonus.
+- Fixed 2026-11-14: leaving during `ending` used to compute the penalty from a total that included the win bonus; leaving in `ending` now pays the normal rewards, and the penalty (in `playing`) removes the result bonus first. Leaving during `intro` / `countdown` used to cost -12 rp and count a match; it now costs nothing. Leaving while knocked or right after being hit used to deny the attacker the kill; it is now credited.
+- If the leaver was the MVP while leaving in `ending`, `finishRound` picks the next participant too, so two players can be told they were MVP (2.4 s window).
 - Armour: a respawn keeps the armour level and restores full durability; the Rook cut also reduces zone damage.
 - `squad` rounds (180 s) end before the last zone phase finishes shrinking (160 + 30 s).
 - Fixed 2026-11-14: `ult` is no longer broadcast to its sender.
