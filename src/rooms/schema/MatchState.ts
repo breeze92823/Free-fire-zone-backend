@@ -103,6 +103,9 @@ export const VehicleState = schema(
     owner: t.string().default(""), // sessionId whose client simulates it
     seats: t.array("string"), // sessionId per seat ("" = free); seats[0] = the driver
     n: t.uint16().default(0), // bumped with every accepted pose (clients buffer on change)
+    hp: t.float32().default(0), // health (VEHICLE_TYPES hp when new); burns down below burnBelow
+    wreck: t.boolean().default(false), // destroyed: a burnt-out shell nobody can get in, until it respawns
+    life: t.uint8().default(0), // bumped when a new one is parked at its spawn (clients rebuild it)
   },
   "VehicleState",
 );

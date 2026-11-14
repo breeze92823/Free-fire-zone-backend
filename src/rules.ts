@@ -138,9 +138,32 @@ export const MAP_COUNT = MAPS.length;
 // Vehicles (vehicles.ts; client config.js VEHICLES): seats per type, and where each world's are parked
 // at the start of a round (yaw: 0 = facing +z, PI/2 = +x). Dustline Ridge: a Jeep and a Dune Buggy
 // in each camp's vehicle bay (West Camp = blue, East Camp = orange; anyone may take any).
-export const VEHICLE_TYPES: Record<string, { seats: number }> = {
-  jeep: { seats: 4 },
-  buggy: { seats: 2 },
+// hp: its health (VehicleState.hp); gunSeat: the seat that mans its mounted gun (MOUNTS[mount]).
+export const VEHICLE_TYPES: Record<string, { seats: number; hp: number; gunSeat?: number; mount?: string }> = {
+  jeep: { seats: 4, hp: 1200, gunSeat: 3, mount: "mg" },
+  buggy: { seats: 2, hp: 750 },
+};
+// Mounted guns (client config.js MOUNTS): fired only from their vehicle's gunner seat, with no ammo
+// (the client overheats it). Checked like any weapon (fire rate, range, falloff).
+export const MOUNTS: Record<string, WeaponRule> = {
+  mg: { slot: "primary", damage: 26, interval: 0.085, range: 170, headMul: 1.6 },
+};
+// Damage to vehicles (vehicles.ts, MatchRoom vhit / boom / blast / ram). Client config.js VEHICLE_DAMAGE.
+export const VEHICLE_DAMAGE = {
+  bullet: 0.6, // share of a bullet's damage a vehicle takes (no headshots, no armour)
+  blast: 1.4, // frags and launcher rounds, with the usual falloff
+  sticky: 2.0, // a sticky charge that went off on it (within stickyReach m of its centre)
+  stickyReach: 2.6,
+  size: 2.2, // m: a vehicle is big (added to ranges; a blast measures to its surface, about this far in)
+  burnBelow: 0.2, // share of its hp below which it burns down on its own (get out!)
+  burnRate: 0.05, // share of its full hp lost per second while burning
+  wreckRadius: 7, // m: the explosion when it is destroyed
+  wreckDamage: 150, // at the centre, falling off (armour helps)
+  seatedDamage: 230, // to everyone still seated in it (armour does not help)
+  respawn: 30, // s a wreck stays before a new one is parked at its spawn
+  // Running someone over (the driver's client reports `ram`): base + perMs per m/s above minSpeed,
+  // at most max; once per target per gapMs; the target must be within reach m of the vehicle.
+  ram: { minSpeed: 8, base: 30, perMs: 7, max: 200, gapMs: 900, reach: 4.5 },
 };
 export const VEHICLE_SPAWNS: Record<WorldId, { id: string; type: string; x: number; z: number; yaw: number }[]> = {
   coral: [],

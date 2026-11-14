@@ -406,9 +406,15 @@ Dustline Ridge rounds have four vehicles (`rules.ts VEHICLE_SPAWNS.ridge`: a Jee
 | `exit`, knock, eliminate, `spawn` | `eject(sid)`: out of the seat (and out of any seat naming them). The owner keeps simulating the vehicle it left |
 | `leaveMatch` (leave, or a disconnect past the reconnect window) | `release(sid)`: ejected, and every vehicle it owned passes to its current driver or to nobody |
 | `vpose` | `pose(sid, msg)`: only from the owner; bounds as player poses; speed `VEHICLE_MAX_SPEED * dt + VEHICLE_SLACK` against the last accepted pose (`meta`: time and position per vehicle) except a jump back to its own spawn; writes the pose, bumps `n`; `r: 1` with nobody driving clears `owner` |
+| `vhit`, `boom` / `blast` with `vt` | `onVehicleHit`, `blastVehicles` (MatchRoom): `canHurt(id, team, sid)` (not a wreck; not one the attacker sits in; nobody of its side inside: empty vehicles are anyone's target), range / distance from `where(id)` (horizontal for a never-moved vehicle), then `hurtVehicle` with `VEHICLE_DAMAGE` (bullets x0.6 with falloff, blasts x1.4 to its surface, a sticky charge within 2.6 m of its centre x2.0) |
+| `hurtVehicle` | `damage(id, amount, by, clock)`: `hp` down, `lastHitBy` kept; at 0: `wreck = true`, `respawnAt = clock + respawn (30 s)`, then `wreckVehicle` |
+| `wreckVehicle` (MatchRoom) | everyone seated ejected; `vboom` to all; the seated take `seatedDamage` 230 through armour (`pierce: 1`), anyone else within `wreckRadius` 7 m `wreckDamage` 150 falling off (not the attacker's teammates; the attacker itself half); weapon `vboom`, credited to the destroyer. The owner keeps simulating the wreck until it reports rest |
+| `ram { v, t, sp }` | `onRam` (MatchRoom): the sender drives `v`; an enemy on foot within reach; speed capped by the synced velocity; once per 0.9 s per target (`Session.ramAt`); `ram` relayed (the victim's client takes the push), damage with the vehicle type as the weapon |
+| `simulate` (every tick in `playing` / `ending`) | `tick(dt, clock)`: below `burnBelow` (20 %) it loses `burnRate` (5 %) of its full hp per second (credited to `lastHitBy` when it burns out); a wreck past `respawnAt` is replaced: `park(id)` (spawn pose, `PARKED_Y`, full hp, no owner or seats) and `life` bumped |
+| mounted gun | `mountOf(p)`: the `MOUNTS` id when `p` sits in its vehicle's `gunSeat` (the Jeep's seat 3) and it is not a wreck; `carries` accepts it, so `shot`, `hit` and `vhit` work with `w: 'mg'` |
 | results end | `clear()` |
 
-Seated players' own poses (`pose`) are checked against the vehicle limit instead of `MAX_SPEED` (5.6). Bullets ignore vehicles for now, and nobody is hurt by one (cover, vehicle health, ramming are the next milestone). Tests: `test/Vehicles.test.ts`.
+Seated players' own poses (`pose`) are checked against the vehicle limit instead of `MAX_SPEED` (5.6). `enter` refuses a wreck. Fire rate for `hit` and `vhit` shares one check (`shotOk`: a shot number seen before passes). Tests: `test/Vehicles.test.ts` (seats, poses, damage and wrecks, burning, the mounted gun, ramming).
 
 ### 5.10 Map vote, rewards, Gems, leaving penalty
 

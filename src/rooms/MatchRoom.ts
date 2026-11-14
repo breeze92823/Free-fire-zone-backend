@@ -7,7 +7,7 @@ import {
 } from "../constants.js";
 import {
   ASSIST_WINDOW, FIRE_TICK, GEMS, GRENADES, HEALTH, ITEMS, JIN_HEAL, LOOT, MAP_COUNT, MAPS, MODES, OPERATIVES, PAN_BEHIND_COS, PHASES, REACTIONS, REWARDS, ROOK_DAMAGE_TAKEN,
-  STREAK_WINDOW, ULT_MIN_GAP_S, WEAPONS, GEMS_MAX, damageFalloff, levelOf,
+  STREAK_WINDOW, ULT_MIN_GAP_S, WEAPONS, GEMS_MAX, MOUNTS, VEHICLE_DAMAGE, damageFalloff, levelOf, type WeaponRule,
 } from "../rules.js";
 import { Zone } from "../zone.js";
 import { Vehicles } from "../vehicles.js";
@@ -41,6 +41,7 @@ interface Session {
   burstAt: Map<string, number>; // weapon -> ms the current burst (or single shot) started
   burstN: Map<string, number>; // weapon -> shots counted in that burst
   blastAt: Map<string, number>; // launcher -> ms of its last reported blast
+  ramAt: Map<string, number>; // target sessionId -> ms this player last ran them over
   throws: number; // frags thrown and not yet exploded
   throwKind: string; // the grenade type of the last throw (GRENADES)
   lastThrowAt: number; // ms
@@ -331,6 +332,10 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     // The shooter's hit report: { t: target sessionId, w: weapon, s: shot number, n: pellets that
     // hit, h: of them on the head, d: distance (m) }. Knife and fists use it too (melee).
     hit: (client: Client, msg: any) => this.onHit(client.sessionId, msg),
+    // A shot that hit a vehicle: { v: vehicle id, w, s: shot number, n: pellets, d: distance (m) }.
+    vhit: (client: Client, msg: any) => this.onVehicleHit(client.sessionId, msg),
+    // The driver ran someone over: { v: vehicle id, t: target sessionId, sp: speed (m/s) }.
+    ram: (client: Client, msg: any) => this.onRam(client.sessionId, msg),
     // Frag thrown (visual relay; the explosion is reported by the thrower as `boom`).
     throw: (client: Client, msg: any) => {
       const p = this.player(client);
@@ -577,6 +582,7 @@ export class MatchRoom extends Room<{ state: MatchState }> {
       burstAt: new Map(),
       burstN: new Map(),
       blastAt: new Map(),
+      ramAt: new Map(),
       throws: 0,
       throwKind: "frag",
       lastThrowAt: 0,
@@ -639,7 +645,31 @@ export class MatchRoom extends Room<{ state: MatchState }> {
   }
 
   private carries(p: PlayerState, w: string) {
-    return w === p.primary || w === p.secondary || w === (p.melee || "knife") || w === "fists";
+    return w === p.primary || w === p.secondary || w === (p.melee || "knife") || w === "fists" || (w in MOUNTS && this.vehicles.mountOf(p) === w);
+  }
+
+  // A weapon's rules: the arsenal's, or a mounted gun's (the Jeep's gunner seat).
+  private ruleOf(w: string): WeaponRule | undefined {
+    return WEAPONS[w] ?? MOUNTS[w];
+  }
+
+  // Fire rate: a new shot number must wait the weapon's interval (one shot may hit several players
+  // and vehicles: the same number passes). A burst weapon may fire `burst` shots `burstGap` apart,
+  // then waits `interval` from the start of that burst.
+  private shotOk(s: Session, w: string, seq: number, rule: WeaponRule) {
+    if (s.shotSeq.get(w) === seq) return true;
+    const now = Date.now();
+    const last = s.shotAt.get(w) ?? 0;
+    const start = s.burstAt.get(w) ?? 0;
+    const n = s.burstN.get(w) ?? 0;
+    if (now - start >= rule.interval * 1000 * FIRE_RATE_SLACK) {
+      s.burstAt.set(w, now);
+      s.burstN.set(w, 1);
+    } else if (rule.burst && n < rule.burst && now - last >= (rule.burstGap ?? 0) * 1000 * FIRE_RATE_SLACK) s.burstN.set(w, n + 1);
+    else return false;
+    s.shotSeq.set(w, seq);
+    s.shotAt.set(w, now);
+    return true;
   }
 
   private inRound() {
@@ -1144,6 +1174,7 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     const clock = st.clock;
     this.zone.update(clock);
     if (this.fires.length) this.burnFires(dt);
+    if (this.state.vehicles.size) for (const w of this.vehicles.tick(dt, clock)) this.wreckVehicle(w.id, w.by || null);
     // Opened crates refill.
     for (const [k, at] of st.crates) if (clock >= at) st.crates.delete(k);
     // Supply drops over the zone.
@@ -1188,28 +1219,12 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     const tid = typeof msg?.t === "string" ? msg.t : "";
     const t = this.state.players.get(tid);
     const w = typeof msg?.w === "string" ? msg.w : "";
-    const rule = WEAPONS[w];
+    const rule = this.ruleOf(w);
     if (!a || !s || !t || !rule || tid === sessionId || !this.fighting()) return;
     if (a.life !== "alive" || !a.team || t.life === "dead" || !t.team || !this.carries(a, w)) return;
     const ally = t.team === a.team;
     if (ally && !rule.heal) return;
-    // Fire rate: a new shot number must wait the weapon's interval (one shot may hit several players).
-    // A burst weapon may fire `burst` shots `burstGap` apart, then waits `interval` from the start of
-    // that burst.
-    const seq = num(msg.s) ?? -1;
-    const now = Date.now();
-    if (s.shotSeq.get(w) !== seq) {
-      const last = s.shotAt.get(w) ?? 0;
-      const start = s.burstAt.get(w) ?? 0;
-      const n = s.burstN.get(w) ?? 0;
-      if (now - start >= rule.interval * 1000 * FIRE_RATE_SLACK) {
-        s.burstAt.set(w, now);
-        s.burstN.set(w, 1);
-      } else if (rule.burst && n < rule.burst && now - last >= (rule.burstGap ?? 0) * 1000 * FIRE_RATE_SLACK) s.burstN.set(w, n + 1);
-      else return;
-      s.shotSeq.set(w, seq);
-      s.shotAt.set(w, now);
-    }
+    if (!this.shotOk(s, w, num(msg.s) ?? -1, rule)) return;
     // Range, against where the server last saw both players.
     const dist = Math.hypot(t.x - a.x, t.y - a.y, t.z - a.z);
     const melee = !!rule.melee;
@@ -1260,6 +1275,7 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     if (now - (s.blastAt.get(w) ?? 0) < rule.interval * 1000 * FIRE_RATE_SLACK) return;
     s.blastAt.set(w, now);
     this.broadcast("blast", { id: sessionId, w, x, y, z }, { except: this.clients.find((c) => c.sessionId === sessionId) });
+    this.blastVehicles(sessionId, a.team, msg?.vt, x, y, z, rule.blast, rule.damage, false);
     const targets: string[] = Array.isArray(msg?.t) ? msg.t.filter((v: unknown) => typeof v === "string").slice(0, ROOM_MAX_CLIENTS) : [];
     const R = rule.blast;
     for (const tid of new Set(targets)) {
@@ -1272,6 +1288,90 @@ export class MatchRoom extends Room<{ state: MatchState }> {
       const dmg = rule.damage * k * (tid === sessionId ? 0.5 : 1);
       if (dmg > 0.5) this.applyDamage(tid, dmg, sessionId, { explosive: true, weapon: w });
     }
+  }
+
+  // --- Vehicles: hits, blasts, ramming, wrecks ------------------------------------------------------
+  private onVehicleHit(sessionId: string, msg: any) {
+    const a = this.state.players.get(sessionId);
+    const s = this.sessions.get(sessionId);
+    const w = typeof msg?.w === "string" ? msg.w : "";
+    const id = typeof msg?.v === "string" ? msg.v : "";
+    const rule = this.ruleOf(w);
+    if (!a || !s || !rule || rule.melee || !this.fighting() || a.life !== "alive" || !a.team || !this.carries(a, w)) return;
+    if (!this.vehicles.canHurt(id, a.team, sessionId)) return;
+    if (!this.shotOk(s, w, num(msg.s) ?? -1, rule)) return;
+    const at = this.vehicles.where(id)!;
+    const dist = at.parked ? Math.hypot(at.x - a.x, at.z - a.z) : Math.hypot(at.x - a.x, at.y - a.y, at.z - a.z);
+    if (dist > rule.range + RANGE_SLACK + VEHICLE_DAMAGE.size) return;
+    const n = clampN(Math.floor(num(msg.n) ?? 1), 1, rule.pellets ?? 1);
+    const d = clampN(num(msg.d) ?? dist, 0, rule.range);
+    this.hurtVehicle(id, rule.damage * damageFalloff(rule, d) * n * VEHICLE_DAMAGE.bullet, sessionId);
+  }
+
+  // A frag / launcher round went off at x, y, z: the vehicles its thrower lists (in line of sight)
+  // take the blast, measured to their surface; a sticky charge on one hurts it most.
+  private blastVehicles(sessionId: string, team: string, list: unknown, x: number, y: number, z: number, R: number, damage: number, sticky: boolean) {
+    if (!Array.isArray(list)) return;
+    for (const id of new Set(list.filter((v: unknown) => typeof v === "string").slice(0, 8) as string[])) {
+      if (!this.vehicles.canHurt(id, team, sessionId)) continue;
+      const at = this.vehicles.where(id)!;
+      const raw = at.parked ? Math.hypot(at.x - x, at.z - z) : Math.hypot(at.x - x, at.y - y, at.z - z);
+      if (raw > R + VEHICLE_DAMAGE.size + 2) continue;
+      const dist = Math.max(0, raw - VEHICLE_DAMAGE.size);
+      const k = Math.pow(1 - Math.min(dist, R) / R, 0.7);
+      const mul = sticky && raw <= VEHICLE_DAMAGE.stickyReach ? VEHICLE_DAMAGE.sticky : VEHICLE_DAMAGE.blast;
+      if (damage * k > 0.5) this.hurtVehicle(id, damage * k * mul, sessionId);
+    }
+  }
+
+  private hurtVehicle(id: string, amount: number, attackerId: string | null) {
+    if (this.vehicles.damage(id, amount, attackerId, this.state.clock)) this.wreckVehicle(id, attackerId);
+  }
+
+  // Destroyed: everyone seated is thrown out and badly hurt (armour does not help), anyone near
+  // catches the blast (not the attacker's teammates; the attacker half), and every client draws
+  // the explosion (`vboom`) and turns it into a burnt-out shell until it respawns.
+  private wreckVehicle(id: string, attackerId: string | null) {
+    const v = this.state.vehicles.get(id);
+    const at = this.vehicles.where(id);
+    if (!v || !at) return;
+    const seated = new Set([...v.seats].filter(Boolean));
+    for (const sid of seated) this.vehicles.eject(sid);
+    const y = at.parked ? 0 : at.y;
+    this.broadcast("vboom", { v: id, x: at.x, y: at.parked ? -100 : at.y, z: at.z, a: attackerId ?? "" });
+    const a = attackerId ? this.state.players.get(attackerId) : undefined;
+    const R = VEHICLE_DAMAGE.wreckRadius;
+    for (const [tid, t] of this.inRound()) {
+      if (t.life === "dead") continue;
+      const inside = seated.has(tid);
+      if (!inside && a && tid !== attackerId && t.team === a.team) continue;
+      const dist = at.parked ? Math.hypot(t.x - at.x, t.z - at.z) : Math.hypot(t.x - at.x, t.y + 1 - y, t.z - at.z);
+      if (!inside && dist > R) continue;
+      let dmg = inside ? VEHICLE_DAMAGE.seatedDamage : VEHICLE_DAMAGE.wreckDamage * Math.pow(1 - Math.min(dist, R) / R, 0.7);
+      if (tid === attackerId && !inside) dmg *= 0.5;
+      if (dmg > 0.5) this.applyDamage(tid, dmg, attackerId, { explosive: true, weapon: "vboom", pierce: inside ? 1 : 0 });
+    }
+  }
+
+  private onRam(sessionId: string, msg: any) {
+    const a = this.state.players.get(sessionId);
+    const s = this.sessions.get(sessionId);
+    const id = typeof msg?.v === "string" ? msg.v : "";
+    const tid = typeof msg?.t === "string" ? msg.t : "";
+    const v = this.state.vehicles.get(id);
+    const t = this.state.players.get(tid);
+    if (!a || !s || !v || !t || !this.fighting() || a.life !== "alive" || !a.team) return;
+    if (v.wreck || v.seats[0] !== sessionId || tid === sessionId || t.life === "dead" || !t.team || t.team === a.team || t.veh) return;
+    const R = VEHICLE_DAMAGE.ram;
+    const speed = Math.min(num(msg.sp) ?? 0, Math.hypot(v.vx, v.vy, v.vz) + 3, VEHICLE_MAX_SPEED);
+    if (!(speed >= R.minSpeed)) return;
+    // Both positions trail the screens they came from: allow for the vehicle's speed.
+    if (Math.hypot(t.x - v.x, t.z - v.z) > R.reach + speed * 0.3 + 2) return;
+    const now = Date.now();
+    if (now - (s.ramAt.get(tid) ?? 0) < R.gapMs) return;
+    s.ramAt.set(tid, now);
+    this.broadcast("ram", { t: tid, v: id, x: Math.round(v.vx * 10) / 10, z: Math.round(v.vz * 10) / 10 });
+    this.applyDamage(tid, Math.min(R.max, R.base + (speed - R.minSpeed) * R.perMs), sessionId, { weapon: v.type });
   }
 
   // Burning patches: every FIRE_TICK s, anyone standing in one (not the thrower's teammates; the
@@ -1312,6 +1412,7 @@ export class MatchRoom extends Room<{ state: MatchState }> {
       return;
     }
     if (g.effect === "smoke" || g.effect === "flash") return;
+    this.blastVehicles(sessionId, a.team, msg?.vt, x, y, z, g.radius, g.damage, g.effect === "sticky");
     const targets: string[] = Array.isArray(msg?.t) ? msg.t.filter((v: unknown) => typeof v === "string").slice(0, ROOM_MAX_CLIENTS) : [];
     const R = g.radius;
     for (const tid of new Set(targets)) {

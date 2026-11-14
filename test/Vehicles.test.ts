@@ -3,7 +3,7 @@ import type { ColyseusTestServer } from "@colyseus/testing";
 
 import type appConfig from "../src/app.config.js";
 import type { MatchState } from "../src/rooms/schema/MatchState.js";
-import { MAPS, PHASES, VEHICLE_SPAWNS } from "../src/rules.js";
+import { MAPS, PHASES, VEHICLE_DAMAGE, VEHICLE_SPAWNS, VEHICLE_TYPES, WEAPONS } from "../src/rules.js";
 import { TIMING, VEHICLE_MAX_SPEED } from "../src/constants.js";
 import { PARKED_Y } from "../src/vehicles.js";
 import { __setPlayersForTest } from "../src/db.js";
@@ -173,5 +173,131 @@ describe("vehicles (vehicles.ts)", () => {
     a.send("leave");
     const jeep = room.state.vehicles.get("wj")!;
     await until(() => jeep.seats[0] === "" && jeep.owner === "", 1000, "freed");
+  });
+
+  it("bullets and blasts wear a vehicle down; a wreck throws everyone out, hurts them and respawns", async () => {
+    const respawn = VEHICLE_DAMAGE.respawn;
+    VEHICLE_DAMAGE.respawn = 0.4;
+    try {
+      const { room, clients } = await startRound(colyseus, RIDGE);
+      const [a, b] = clients;
+      const pa = room.state.players.get(a.sessionId)!;
+      const pb = room.state.players.get(b.sessionId)!;
+      assert.notStrictEqual(pa.team, pb.team);
+      const jeep = room.state.vehicles.get("wj")!;
+      const buggy = room.state.vehicles.get("wb")!;
+      assert.strictEqual(jeep.hp, VEHICLE_TYPES.jeep.hp);
+      a.send("pose", pose(-175, 8));
+      b.send("pose", pose(-160, 15));
+      await sleep(100);
+      a.send("enter", { v: "wj", s: 0 });
+      await until(() => pa.veh === "wj", 1000, "a seated");
+      // a bullet: its damage x VEHICLE_DAMAGE.bullet
+      const w = pb.primary;
+      b.send("vhit", { v: "wj", w, s: 1, n: 1, d: 15 });
+      await until(() => jeep.hp < VEHICLE_TYPES.jeep.hp, 1000, "hit");
+      assert.ok(Math.abs(VEHICLE_TYPES.jeep.hp - jeep.hp - WEAPONS[w].damage * VEHICLE_DAMAGE.bullet) < 0.01);
+      // not its own vehicle, nor a weapon it does not carry
+      const hp = jeep.hp;
+      a.send("vhit", { v: "wj", w: pa.primary, s: 1, n: 1, d: 1 });
+      b.send("vhit", { v: "wj", w: "hawk" === w ? "rhino" : "hawk", s: 2, n: 1, d: 15 });
+      await sleep(120);
+      assert.strictEqual(jeep.hp, hp);
+      // a frag next to the parked buggy (thrown first), measured to its surface
+      b.send("throw", { p: [-170, 6, 18], v: [0, 0, 0] });
+      await sleep(60);
+      b.send("boom", { x: -177, y: 5, z: 20.1, t: [], vt: ["wb"] });
+      await until(() => buggy.hp < VEHICLE_TYPES.buggy.hp, 1000, "blast");
+      assert.ok(Math.abs(VEHICLE_TYPES.buggy.hp - buggy.hp - 170 * VEHICLE_DAMAGE.blast) < 0.5);
+      // the last hits: a wreck; the driver is thrown out and hurt through armour
+      jeep.hp = 1;
+      await sleep(150);
+      b.send("vhit", { v: "wj", w, s: 3, n: 1, d: 15 });
+      await until(() => jeep.wreck, 1000, "wrecked");
+      assert.strictEqual(pa.veh, "");
+      assert.strictEqual(jeep.seats[0], "");
+      assert.notStrictEqual(pa.life, "alive");
+      // nobody gets into a wreck; then a new one is parked at its spawn
+      b.send("pose", pose(-176, 8));
+      await sleep(80);
+      b.send("enter", { v: "wj", s: 1 });
+      await sleep(80);
+      assert.strictEqual(pb.veh, "");
+      const life = jeep.life;
+      await until(() => !jeep.wreck, 2000, "respawned");
+      assert.strictEqual(jeep.hp, VEHICLE_TYPES.jeep.hp);
+      assert.strictEqual(jeep.y, PARKED_Y);
+      assert.strictEqual(jeep.life, (life + 1) & 0xff);
+      assert.strictEqual(jeep.owner, "");
+    } finally {
+      VEHICLE_DAMAGE.respawn = respawn;
+    }
+  });
+
+  it("burns down below its burn line and credits the last attacker", async () => {
+    const { room, clients } = await startRound(colyseus, RIDGE);
+    const [, b] = clients;
+    const buggy = room.state.vehicles.get("wb")!;
+    b.send("pose", pose(-165, 18));
+    await sleep(80);
+    buggy.hp = VEHICLE_TYPES.buggy.hp * VEHICLE_DAMAGE.burnBelow * 0.5;
+    const before = buggy.hp;
+    await sleep(300);
+    assert.ok(buggy.hp < before, "burning");
+    buggy.hp = 0.5;
+    await until(() => buggy.wreck, 1000, "burnt out");
+  });
+
+  it("the Jeep's mounted gun fires only from its gunner seat", async () => {
+    const { room, clients } = await startRound(colyseus, RIDGE);
+    const [a, b] = clients;
+    const pb = room.state.players.get(b.sessionId)!;
+    const gun = VEHICLE_TYPES.jeep.gunSeat!;
+    a.send("pose", pose(-175, 8));
+    b.send("pose", pose(-160, 8));
+    await sleep(100);
+    // on foot: refused
+    a.send("hit", { t: b.sessionId, w: "mg", s: 1, n: 1, h: 0, d: 15 });
+    await sleep(80);
+    assert.strictEqual(pb.hp, 200);
+    a.send("enter", { v: "wj", s: gun });
+    await until(() => room.state.players.get(a.sessionId)!.seat === gun, 1000, "gunner");
+    a.send("hit", { t: b.sessionId, w: "mg", s: 2, n: 1, h: 0, d: 15 });
+    await until(() => pb.hp < 200, 1000, "mg hit");
+  });
+
+  it("running someone over: the driver only, fast enough, close enough, once in a while", async () => {
+    const { room, clients } = await startRound(colyseus, RIDGE);
+    const [a, b] = clients;
+    const pb = room.state.players.get(b.sessionId)!;
+    a.send("pose", pose(-175, 8));
+    b.send("pose", pose(-170, 10));
+    await sleep(100);
+    a.send("enter", { v: "wj", s: 0 });
+    const jeep = room.state.vehicles.get("wj")!;
+    await until(() => jeep.owner === a.sessionId, 1000, "driving");
+    await sleep(300);
+    a.send("vpose", vpose("wj", -172, 9.9, { vx: 20 }));
+    await until(() => jeep.vx === 20, 1000, "moving");
+    // too slow: nothing
+    a.send("ram", { v: "wj", t: b.sessionId, sp: 5 });
+    await sleep(80);
+    assert.strictEqual(pb.hp, 200);
+    a.send("ram", { v: "wj", t: b.sessionId, sp: 20 });
+    const R = VEHICLE_DAMAGE.ram;
+    await until(() => pb.hp < 200, 1000, "rammed");
+    assert.ok(Math.abs(200 - pb.hp - (R.base + (20 - R.minSpeed) * R.perMs)) < 0.5);
+    // again at once: within the gap
+    const hp = pb.hp;
+    a.send("ram", { v: "wj", t: b.sessionId, sp: 20 });
+    await sleep(100);
+    assert.strictEqual(pb.hp, hp);
+    // far away: nothing
+    await sleep(R.gapMs);
+    b.send("pose", pose(-150, 30));
+    await sleep(100);
+    a.send("ram", { v: "wj", t: b.sessionId, sp: 20 });
+    await sleep(100);
+    assert.strictEqual(pb.hp, hp);
   });
 });

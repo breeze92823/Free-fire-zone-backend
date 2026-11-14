@@ -4,11 +4,15 @@
 //
 // Messages (MatchRoom wires them): `enter { v, s }` (vehicle id, seat), `exit`, `vpose { v, x, y, z,
 // qx, qy, qz, qw, vx, vy, vz, st, r }` (r = at rest: the owner lets go once nobody drives it).
+//
+// Health: bullets, blasts and sticky charges hurt it (MatchRoom works out how much: VEHICLE_DAMAGE);
+// below burnBelow it burns down on its own; at 0 it is a wreck (MatchRoom blows it up: everyone
+// seated is thrown out and hurt) and after VEHICLE_DAMAGE.respawn s a new one is parked at its spawn.
 import { MapSchema, ArraySchema } from "@colyseus/schema";
 
 import { VehicleState, type MatchState, type PlayerState } from "./rooms/schema/MatchState.js";
 import { VEHICLE_ENTER_RANGE, VEHICLE_MAX_SPEED, VEHICLE_SLACK, WORLD_BOUND } from "./constants.js";
-import { VEHICLE_SPAWNS, VEHICLE_TYPES, type WorldId } from "./rules.js";
+import { VEHICLE_DAMAGE, VEHICLE_SPAWNS, VEHICLE_TYPES, type WorldId } from "./rules.js";
 
 export const PARKED_Y = -100; // VehicleState.y before its first pose: on the ground at its spawn
 
@@ -16,10 +20,12 @@ const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : n
 
 // Server-side bookkeeping per vehicle (never synced).
 export interface VehicleMeta {
-  spawn: { x: number; z: number };
+  spawn: { x: number; z: number; yaw: number };
   at: number; // ms of the last accepted pose
   x: number;
   z: number;
+  lastHitBy: string; // sessionId of the last player who hurt it (credited if it burns down)
+  respawnAt: number; // round clock a wreck is replaced (0 = not a wreck)
 }
 
 export class Vehicles {
@@ -32,15 +38,97 @@ export class Vehicles {
     for (const sp of VEHICLE_SPAWNS[world] ?? []) {
       const v = new VehicleState();
       v.type = sp.type;
-      v.x = sp.x;
-      v.z = sp.z;
-      v.y = PARKED_Y;
-      v.qy = Math.sin(sp.yaw / 2);
-      v.qw = Math.cos(sp.yaw / 2);
       v.seats = new ArraySchema<string>(...Array.from({ length: VEHICLE_TYPES[sp.type]?.seats ?? 1 }, () => ""));
       this.state.vehicles.set(sp.id, v);
-      this.meta.set(sp.id, { spawn: { x: sp.x, z: sp.z }, at: 0, x: sp.x, z: sp.z });
+      this.meta.set(sp.id, { spawn: { x: sp.x, z: sp.z, yaw: sp.yaw }, at: 0, x: sp.x, z: sp.z, lastHitBy: "", respawnAt: 0 });
+      this.park(sp.id);
     }
+  }
+
+  // A new vehicle at its spawn: parked, full health, nobody in it or simulating it.
+  private park(id: string) {
+    const v = this.state.vehicles.get(id);
+    const m = this.meta.get(id);
+    if (!v || !m) return;
+    for (const p of this.state.players.values()) if (p.veh === id) (p.veh = ""), (p.seat = -1);
+    v.x = m.spawn.x;
+    v.z = m.spawn.z;
+    v.y = PARKED_Y;
+    v.qx = 0;
+    v.qz = 0;
+    v.qy = Math.sin(m.spawn.yaw / 2);
+    v.qw = Math.cos(m.spawn.yaw / 2);
+    v.vx = v.vy = v.vz = 0;
+    v.steer = 0;
+    v.owner = "";
+    for (let i = 0; i < v.seats.length; i++) v.seats[i] = "";
+    v.hp = VEHICLE_TYPES[v.type]?.hp ?? 1000;
+    v.wreck = false;
+    v.n = (v.n + 1) & 0xffff;
+    m.at = 0;
+    m.x = m.spawn.x;
+    m.z = m.spawn.z;
+    m.lastHitBy = "";
+    m.respawnAt = 0;
+  }
+
+  // Where it is for hit checks; `parked`: never moved (y unknown: compare horizontally).
+  where(id: string): { x: number; y: number; z: number; parked: boolean } | null {
+    const v = this.state.vehicles.get(id);
+    if (!v) return null;
+    return { x: v.x, y: v.y, z: v.z, parked: v.y === PARKED_Y };
+  }
+
+  // The mounted gun `p` mans (its seat is its vehicle's gunner seat), or "".
+  mountOf(p: PlayerState): string {
+    const v = p.veh ? this.state.vehicles.get(p.veh) : undefined;
+    const type = v ? VEHICLE_TYPES[v.type] : undefined;
+    return type?.mount && type.gunSeat === p.seat && !v!.wreck ? type.mount : "";
+  }
+
+  // May a player of `team` (session `sid`) hurt vehicle `id`? Not a wreck, not one they sit in, and
+  // nobody on their own side sits in it (empty vehicles are anyone's target).
+  canHurt(id: string, team: string, sid: string): boolean {
+    const v = this.state.vehicles.get(id);
+    if (!v || v.wreck) return false;
+    for (const s of v.seats) {
+      if (!s) continue;
+      if (s === sid || this.state.players.get(s)?.team === team) return false;
+    }
+    return true;
+  }
+
+  // Takes `amount` off its health; true when that destroyed it (MatchRoom then blows it up).
+  damage(id: string, amount: number, by: string | null, clock: number): boolean {
+    const v = this.state.vehicles.get(id);
+    const m = this.meta.get(id);
+    if (!v || !m || v.wreck || !(amount > 0)) return false;
+    if (by) m.lastHitBy = by;
+    v.hp = Math.max(0, v.hp - amount);
+    if (v.hp > 0) return false;
+    v.wreck = true;
+    m.respawnAt = clock + VEHICLE_DAMAGE.respawn;
+    return true;
+  }
+
+  // Once per server tick in a round: burning vehicles lose health (returns those that just burnt
+  // out, with who to credit) and wrecks past their time are replaced.
+  tick(dt: number, clock: number): { id: string; by: string }[] {
+    const out: { id: string; by: string }[] = [];
+    for (const [id, v] of this.state.vehicles) {
+      const m = this.meta.get(id);
+      if (!m) continue;
+      if (v.wreck) {
+        if (m.respawnAt && clock >= m.respawnAt) {
+          this.park(id);
+          v.life = (v.life + 1) & 0xff; // a new one: every client rebuilds it
+        }
+        continue;
+      }
+      const max = VEHICLE_TYPES[v.type]?.hp ?? 1000;
+      if (v.hp < max * VEHICLE_DAMAGE.burnBelow && this.damage(id, max * VEHICLE_DAMAGE.burnRate * dt, null, clock)) out.push({ id, by: m.lastHitBy });
+    }
+    return out;
   }
 
   clear() {
@@ -57,7 +145,7 @@ export class Vehicles {
     if (typeof id !== "string") return false;
     const v = this.state.vehicles.get(id);
     const seat = num(s);
-    if (!v || seat === null || !Number.isInteger(seat) || seat < 0 || seat >= v.seats.length) return false;
+    if (!v || v.wreck || seat === null || !Number.isInteger(seat) || seat < 0 || seat >= v.seats.length) return false;
     if (p.life !== "alive" || !p.inMatch || !p.team || p.veh) return false;
     if (v.seats[seat]) return false;
     if (Math.hypot(p.x - v.x, p.z - v.z) > VEHICLE_ENTER_RANGE) return false;
