@@ -945,20 +945,25 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     ready.sort(() => Math.random() - 0.5);
     ready.sort(([a], [b]) => seat(a) - seat(b)); // longest without a seat first
     // A squad is seated together: its members follow its first member in the order.
-    const order: typeof ready = [];
+    const groups: (typeof ready)[] = [];
     const placed = new Set<string>();
     for (const e of ready) {
       if (placed.has(e[0])) continue;
       placed.add(e[0]);
-      order.push(e);
-      if (!e[1].squad) continue;
-      for (const o of ready) {
-        if (placed.has(o[0]) || o[1].squad !== e[1].squad) continue;
-        placed.add(o[0]);
-        order.push(o);
+      const group = [e];
+      if (e[1].squad) {
+        for (const o of ready) {
+          if (placed.has(o[0]) || o[1].squad !== e[1].squad) continue;
+          placed.add(o[0]);
+          group.push(o);
+        }
       }
+      groups.push(group);
     }
-    for (const [sid, p] of order) p.team = this.pickTeam(sid, p);
+    // Bigger groups first (stable, so the sat-out-first order holds within a size): solos placed before
+    // a squad could balance the sides 2 / 2 and leave no side with room for the whole squad.
+    groups.sort((a, b) => b.length - a.length);
+    for (const [sid, p] of groups.flat()) p.team = this.pickTeam(sid, p);
     this.setPhase("intro", PHASES.intro);
     for (const [sid, p] of ready) {
       if (!p.team) continue;

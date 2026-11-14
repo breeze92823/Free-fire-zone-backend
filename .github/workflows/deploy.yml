@@ -90,10 +90,20 @@ jobs:
             echo "::error::Could not read ROOM_MAX_CLIENTS from src/constants.ts."
             exit 1
           fi
-          curl -sSf -X POST "https://legion.bloxity.io/v1/apps/${GAME_ID}/deploy" \
+          BODY="{\"channel\":\"${CHANNEL}\",\"image\":\"${REGISTRY}/${OWNER}/${GAME_ID}-server:${CHANNEL}-${{ github.sha }}\",\"version\":\"${{ github.sha }}\",\"roomSize\":${ROOM_SIZE}}"
+          echo "Deploying: ${BODY}"
+          # No `curl -f`: it throws the response body away, and the body says why Legion refused (a bare "400" does not).
+          HTTP_CODE=$(curl -sS -o legion-response.txt -w '%{http_code}' -X POST "https://legion.bloxity.io/v1/apps/${GAME_ID}/deploy" \
             -H "Authorization: Bearer ${LEGION_DEPLOY_TOKEN}" \
             -H 'Content-Type: application/json' \
-            -d "{\"channel\":\"${CHANNEL}\",\"image\":\"${REGISTRY}/${OWNER}/${GAME_ID}-server:${CHANNEL}-${{ github.sha }}\",\"version\":\"${{ github.sha }}\",\"roomSize\":${ROOM_SIZE}}"
+            -d "${BODY}")
+          echo "Legion answered HTTP ${HTTP_CODE}:"
+          cat legion-response.txt
+          echo
+          if [ "${HTTP_CODE}" -lt 200 ] || [ "${HTTP_CODE}" -ge 300 ]; then
+            echo "::error::Legion deploy failed with HTTP ${HTTP_CODE} (response body above)."
+            exit 1
+          fi
         env:
           LEGION_DEPLOY_TOKEN: ${{ secrets.LEGION_DEPLOY_TOKEN }}
           CHANNEL: ${{ steps.channel.outputs.channel }}

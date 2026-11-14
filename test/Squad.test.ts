@@ -106,26 +106,36 @@ describe("squad (lobby team)", () => {
   });
 
   it("only the leader presses Play, and the whole squad is queued and seated together", async () => {
-    const room = await colyseus.createRoom<MatchState>("match", {});
-    const a = await join(colyseus, room, "Ann");
-    const b = await join(colyseus, room, "Bo");
-    const solos = [await join(colyseus, room, "S1"), await join(colyseus, room, "S2"), await join(colyseus, room, "S3")];
-    a.send("invite", { to: b.sessionId });
-    await until(() => b.invites.length === 1);
-    b.send("inviteReply", { id: b.invites[0].id, accept: true });
-    const pa = room.state.players.get(a.sessionId)!;
-    const pb = room.state.players.get(b.sessionId)!;
-    await until(() => pb.squad === pa.squad && !!pa.squad);
-    b.send("play", {});
-    await until(() => b.notes.some((n: any) => n.kind === "notLeader"), 1000, "member cannot start");
-    assert.ok(!pb.inMatch && !pa.inMatch);
-    for (const s of solos) s.send("play", {});
-    a.send("play", { mode: "squad" });
-    await until(() => pa.inMatch && pb.inMatch, 1000, "both queued by the leader");
-    await until(() => room.state.phase === "playing", 3000, "playing");
-    assert.ok(pa.team && pa.team === pb.team, "the squad shares a team");
-    const sameSide = solos.filter((s) => room.state.players.get(s.sessionId)!.team === pa.team).length;
-    assert.strictEqual(sameSide, 1, "3 per side: one solo joins the squad's side");
+    // The vote must outlast the clients' messages: with the suite's 0.1 s vote, the round could start
+    // as soon as two players were queued, before the squad leader's Play arrived (flaky on slow CI).
+    const voteWas = PHASES.vote;
+    PHASES.vote = 1;
+    try {
+      const room = await colyseus.createRoom<MatchState>("match", {});
+      const a = await join(colyseus, room, "Ann");
+      const b = await join(colyseus, room, "Bo");
+      // Six players fill both sides (3 + 3), so the squad's side always gets exactly one solo.
+      const solos = [];
+      for (const n of ["S1", "S2", "S3", "S4"]) solos.push(await join(colyseus, room, n));
+      a.send("invite", { to: b.sessionId });
+      await until(() => b.invites.length === 1);
+      b.send("inviteReply", { id: b.invites[0].id, accept: true });
+      const pa = room.state.players.get(a.sessionId)!;
+      const pb = room.state.players.get(b.sessionId)!;
+      await until(() => pb.squad === pa.squad && !!pa.squad);
+      b.send("play", {});
+      await until(() => b.notes.some((n: any) => n.kind === "notLeader"), 1000, "member cannot start");
+      assert.ok(!pb.inMatch && !pa.inMatch);
+      a.send("play", { mode: "squad" });
+      await until(() => pa.inMatch && pb.inMatch, 1000, "both queued by the leader");
+      for (const s of solos) s.send("play", {});
+      await until(() => room.state.phase === "playing", 5000, "playing");
+      assert.ok(pa.team && pa.team === pb.team, "the squad shares a team");
+      const sameSide = solos.filter((s) => room.state.players.get(s.sessionId)!.team === pa.team).length;
+      assert.strictEqual(sameSide, 1, "3 per side: one solo joins the squad's side");
+    } finally {
+      PHASES.vote = voteWas;
+    }
   });
 
   it("leaving hands the lead over; a squad of one dissolves; leaving the room leaves the squad", async () => {
