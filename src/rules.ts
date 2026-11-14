@@ -153,6 +153,7 @@ export const VEHICLE_DAMAGE = {
   bullet: 0.6, // share of a bullet's damage a vehicle takes (no headshots, no armour)
   blast: 1.4, // frags and launcher rounds, with the usual falloff
   sticky: 2.0, // a sticky charge that went off on it (within stickyReach m of its centre)
+  fire: 1.0, // a Firebottle's burning patch under it (its dps, per FIRE_TICK)
   stickyReach: 2.6,
   size: 2.2, // m: a vehicle is big (added to ranges; a blast measures to its surface, about this far in)
   burnBelow: 0.2, // share of its hp below which it burns down on its own (get out!)
@@ -172,6 +173,23 @@ export const VEHICLE_SPAWNS: Record<WorldId, { id: string; type: string; x: numb
     { id: "wb", type: "buggy", x: -177, z: 20.1, yaw: Math.PI / 2 },
     { id: "ej", type: "jeep", x: 177, z: -9.9, yaw: -Math.PI / 2 },
     { id: "eb", type: "buggy", x: 177, z: -20.1, yaw: -Math.PI / 2 },
+  ],
+};
+
+// Where a destroyed vehicle's replacement may be parked (on roads, clear of buildings), besides its own
+// spawn: the one inside the current safe zone nearest its spawn (vehicles.ts tick). Dustline Ridge's
+// zone leaves the camps after about two minutes, so later vehicles come back on the town roads.
+export const VEHICLE_PARKING: Record<WorldId, { x: number; z: number; yaw: number }[]> = {
+  coral: [],
+  ridge: [
+    { x: -70, z: 4, yaw: Math.PI / 2 }, // main road, west of town
+    { x: 70, z: -4, yaw: -Math.PI / 2 }, // main road, east of town
+    { x: -65.1, z: 65.1, yaw: Math.atan2(-Math.sin((3 * Math.PI) / 4), Math.cos((3 * Math.PI) / 4)) }, // town ring
+    { x: 65.1, z: -65.1, yaw: Math.atan2(-Math.sin(-Math.PI / 4), Math.cos(-Math.PI / 4)) },
+    { x: 65.1, z: 65.1, yaw: Math.atan2(-Math.sin(Math.PI / 4), Math.cos(Math.PI / 4)) },
+    { x: -65.1, z: -65.1, yaw: Math.atan2(-Math.sin((-3 * Math.PI) / 4), Math.cos((-3 * Math.PI) / 4)) },
+    { x: -38, z: 2.2, yaw: Math.PI / 2 }, // main road, town edge
+    { x: 38, z: -2.2, yaw: -Math.PI / 2 },
   ],
 };
 

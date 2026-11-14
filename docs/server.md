@@ -410,7 +410,8 @@ Dustline Ridge rounds have four vehicles (`rules.ts VEHICLE_SPAWNS.ridge`: a Jee
 | `hurtVehicle` | `damage(id, amount, by, clock)`: `hp` down, `lastHitBy` kept; at 0: `wreck = true`, `respawnAt = clock + respawn (30 s)`, then `wreckVehicle` |
 | `wreckVehicle` (MatchRoom) | everyone seated ejected; `vboom` to all; the seated take `seatedDamage` 230 through armour (`pierce: 1`), anyone else within `wreckRadius` 7 m `wreckDamage` 150 falling off (not the attacker's teammates; the attacker itself half); weapon `vboom`, credited to the destroyer. The owner keeps simulating the wreck until it reports rest |
 | `ram { v, t, sp }` | `onRam` (MatchRoom): the sender drives `v`; an enemy on foot within reach; speed capped by the synced velocity; once per 0.9 s per target (`Session.ramAt`); `ram` relayed (the victim's client takes the push), damage with the vehicle type as the weapon |
-| `simulate` (every tick in `playing` / `ending`) | `tick(dt, clock)`: below `burnBelow` (20 %) it loses `burnRate` (5 %) of its full hp per second (credited to `lastHitBy` when it burns out); a wreck past `respawnAt` is replaced: `park(id)` (spawn pose, `PARKED_Y`, full hp, no owner or seats) and `life` bumped |
+| `simulate` (every tick in `playing` / `ending`) | `tick(dt, clock, inZone)`: below `burnBelow` (20 %) it loses `burnRate` (5 %) of its full hp per second (credited to `lastHitBy` when it burns out); a wreck past `respawnAt` is replaced: `respawnSpot` (its camp spot `meta.home` or a `VEHICLE_PARKING` spot: of those clear of other vehicles (8 m) and at least 12 m inside the zone, the nearest to home; with none inside, the deepest in the zone), `park(id, spot)` (that pose, `PARKED_Y`, full hp, no owner or seats; `meta.spawn` = the spot, which the fall-off-the-world check uses) and `life` bumped |
+| `burnFires` | a Firebottle patch also hurts every vehicle within its radius + `size` (and 3 m vertically unless parked) that `canHurt` allows: `dps * FIRE_TICK * VEHICLE_DAMAGE.fire` per tick, credited to the thrower |
 | mounted gun | `mountOf(p)`: the `MOUNTS` id when `p` sits in its vehicle's `gunSeat` (the Jeep's seat 3) and it is not a wreck; `carries` accepts it, so `shot`, `hit` and `vhit` work with `w: 'mg'` |
 | results end | `clear()` |
 
@@ -441,9 +442,9 @@ Seated players' own poses (`pose`) are checked against the vehicle limit instead
 
 ### 5.13 Missions, rank rewards, first-round tips (`src/progress.ts`)
 
-- `MISSIONS` (`perDay` 3, `perWeek` 3, `daily` 8 and `weekly` 6 definitions `{ id, stat, goal, coins, gems }`) and `RANKS` (`name`, `rp`, one-time `coins` / `gems`) mirror the client's `config.js MISSIONS` / `RANKS`.
+- `MISSIONS` (`perDay` 3, `perWeek` 3, `daily` 9 and `weekly` 8 definitions `{ id, stat, goal, coins, gems }`) and `RANKS` (`name`, `rp`, one-time `coins` / `gems`) mirror the client's `config.js MISSIONS` / `RANKS`.
 - `profile.missions = { day, week, daily, weekly }` (slots `{ id, n, claimed }`). `refreshMissions(m, now)` rolls a random set when the UTC date (`dayKey`) or the Monday of the week (`weekKey`) changed; unclaimed rewards of the old set are lost. Called by `sendProfile`, `grant` and `claim`.
-- `countRound(m, stats)` adds a round (`play`, `win`, `elims`, `knocks`, `damage`, `headshots` (headshot hits), `assists`, `revives` from `Session.roundRevives`) to every unclaimed slot, capped at the goal, and returns the ids it finished.
+- `countRound(m, stats)` adds a round (`play`, `win`, `elims`, `knocks`, `damage`, `headshots` (headshot hits), `assists`, `revives` from `Session.roundRevives`, `wrecks` from `Session.roundWrecks` (vehicles this player destroyed: `wreckVehicle`'s credit), `rams` from `Session.roundRams` (accepted run-overs that did damage); both count only in `playing`) to every unclaimed slot, capped at the goal, and returns the ids it finished.
 - `claim { m, i }` -> `claimMission`: errors `loading`, `unknown`, `claimed`, `unfinished`; otherwise pays coins and Gems (capped at `GEMS_MAX`), answers `claimed`, sends `profile`, persists.
 - `payRankUps(profile)`: pays every rank above `profile.rankReward` that `rp` reaches, once. `normalizeProfile` sets a missing `rankReward` to the current rank (no back pay) and a missing `tutorial` to `stats.matches > 0`.
 - `tutorialDone`: sets `profile.tutorial` and persists.

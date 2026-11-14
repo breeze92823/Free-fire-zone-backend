@@ -129,7 +129,7 @@ All listed types are registered in `net.js MESSAGES` and forwarded to `onNet(typ
 | `healed` | `{ t, a, n }`: healed sid, healer sid, HP | A medic weapon healed a teammate | all | bus `heal { target, by, amount }` (green numbers for the healer) |
 | `boom` | `{ id, x, y, z, k }` (`k`: the grenade kind) | A grenade went off | all but the sender | `items.js remoteBoom` (fire pool / smoke cloud / stun flash, and drops the thrower's flying copy) or `combat.js explodeVisual` (bus `explosion`) |
 | `blast` | `{ id, w, x, y, z }` | A launcher round went off | all but the sender | `projectiles.js endRemote` (drops the flying copy) + `combat.js explodeVisual` |
-| `vboom` | `{ v, x, y, z, a }`: vehicle, where (`y` -100 for a never-moved one), the player credited (`""`: it burnt down with nobody to credit) | A vehicle was destroyed (`wreckVehicle`) | all | `vehicleNet.js`: a rocket-size `explodeVisual` on the drawn vehicle, `setWreck` |
+| `vboom` | `{ v, x, y, z, a }`: vehicle, where (`y` -100 for a never-moved one), the player credited (`""`: it burnt down with nobody to credit) | A vehicle was destroyed (`wreckVehicle`) | all | `vehicleNet.js`: a rocket-size `explodeVisual` on the drawn vehicle, `setWreck`, bus `vehicleDestroyed` (the kill feed's "<who> Destroyed <vehicle>") |
 | `ram` | `{ t, v, x, z }`: the player run over, the vehicle, its velocity (x, z) | An accepted `ram` | all | `vehicleNet.js`: the victim's client (not while seated) gets an impulse along the vehicle's way and a camera shake |
 | `wall` | `{ id, x, y, z, yaw }` | Relay of `wall` | all but the sender | `items.js remoteWall`: a real collider locally (bus `wall`) |
 | `ult` | `{ id, op }` | An ability was accepted | all but the sender | `items.js ultVisual(actor, op)` (the client also skips its own id) |
@@ -238,7 +238,9 @@ Values that exist on both sides and must be changed together. Status is from com
 | Vehicle seats per type | `VEHICLES[type].seats.length` (jeep 4, buggy 2) | `VEHICLE_TYPES[type].seats` | agree |
 | Vehicle health, gunner seat | `VEHICLES[type].hp` (1200 / 750), `seats[3].gun` = `'mg'` on the Jeep | `VEHICLE_TYPES[type].hp`, `gunSeat` 3, `mount` `'mg'` | agree |
 | Mounted gun (`damage` 26, `interval` 0.085, `range` 170, `headMul` 1.6) | `MOUNTS.mg` (plus heat, spread, recoil: client only) | `MOUNTS.mg` | agree |
-| Vehicle damage (`burnBelow` 0.2, `wreckRadius` 7, `ram.minSpeed` 8, `ram.gapMs` 900, `size` 2.2) | `VEHICLE_DAMAGE` (the client's share) | `VEHICLE_DAMAGE` (also `bullet`, `blast`, `sticky`, `stickyReach`, `burnRate`, `wreckDamage`, `seatedDamage`, `respawn`, `ram.base` / `perMs` / `max` / `reach`) | agree |
+| Vehicle damage (`burnBelow` 0.2, `wreckRadius` 7, `ram.minSpeed` 8, `ram.gapMs` 900, `size` 2.2) | `VEHICLE_DAMAGE` (the client's share) | `VEHICLE_DAMAGE` (also `bullet`, `blast`, `sticky`, `stickyReach`, `fire`, `burnRate`, `wreckDamage`, `seatedDamage`, `respawn`, `ram.base` / `perMs` / `max` / `reach`) | agree |
+| Where wrecks' replacements park | from the state (`x`, `z`, yaw; `life` changed) | `VEHICLE_PARKING` (+ each vehicle's camp spot) | n/a |
+| Missions incl. vehicles (`d_wreck`, `w_wrecks`, `w_rams`; stats `wrecks`, `rams`) | `MISSIONS` (+ `MISSIONS.text`) | `progress.ts MISSIONS` | agree |
 | Vehicle spawns (Dustline Ridge) | parked from the state (no client copy); the Test Drive uses its own `DRIVE.test` | `VEHICLE_SPAWNS.ridge` (`wj`, `wb` West Camp bay; `ej`, `eb` East Camp bay) | n/a |
 | Vehicle speed | top speeds 24 / 29 m/s (`VEHICLES`) | `VEHICLE_MAX_SPEED` 45 (+ `VEHICLE_SLACK` 8) for vehicle poses and seated players' poses | server looser on purpose |
 | Maps: world and focus, order | `MAPS[i].world`, `MAPS[i].focus` | `MAPS[i]` | agree |

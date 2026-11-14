@@ -3,7 +3,7 @@ import type { ColyseusTestServer } from "@colyseus/testing";
 
 import type appConfig from "../src/app.config.js";
 import type { MatchState } from "../src/rooms/schema/MatchState.js";
-import { MAPS, PHASES, VEHICLE_DAMAGE, VEHICLE_SPAWNS, VEHICLE_TYPES, WEAPONS } from "../src/rules.js";
+import { MAPS, PHASES, VEHICLE_DAMAGE, VEHICLE_PARKING, VEHICLE_SPAWNS, VEHICLE_TYPES, WEAPONS } from "../src/rules.js";
 import { TIMING, VEHICLE_MAX_SPEED } from "../src/constants.js";
 import { PARKED_Y } from "../src/vehicles.js";
 import { __setPlayersForTest } from "../src/db.js";
@@ -299,5 +299,34 @@ describe("vehicles (vehicles.ts)", () => {
     a.send("ram", { v: "wj", t: b.sessionId, sp: 20 });
     await sleep(100);
     assert.strictEqual(pb.hp, hp);
+  });
+
+  it("a wreck's replacement is parked inside the safe zone, nearest its camp", async () => {
+    const { room } = await startRound(colyseus, RIDGE);
+    const vs = (room as any).vehicles;
+    const jeep = room.state.vehicles.get("wj")!;
+    const clock = room.state.clock;
+    vs.damage("wj", 1e6, null, clock);
+    assert.ok(jeep.wreck);
+    // a zone of radius 100 round the town: the camp (x -177) is outside; the nearest spot inside is
+    // the main road west of town
+    const inZone = (x: number, z: number) => Math.hypot(x, z) - 100;
+    vs.tick(0.05, clock + VEHICLE_DAMAGE.respawn + 1, inZone);
+    assert.ok(!jeep.wreck);
+    assert.deepStrictEqual([jeep.x, jeep.z], [VEHICLE_PARKING.ridge[0].x, VEHICLE_PARKING.ridge[0].z]);
+    assert.strictEqual(jeep.y, PARKED_Y);
+    // with the camp inside the zone it goes home
+    vs.damage("wj", 1e6, null, clock);
+    vs.tick(0.05, clock + VEHICLE_DAMAGE.respawn + 1, () => -1000);
+    assert.ok(Math.abs(jeep.x + 177) < 1e-3 && Math.abs(jeep.z - 9.9) < 1e-3, "home");
+  });
+
+  it("a Firebottle's flames burn a vehicle standing in them", async () => {
+    const { room, clients } = await startRound(colyseus, RIDGE);
+    const [a] = clients;
+    const pa = room.state.players.get(a.sessionId)!;
+    const buggy = room.state.vehicles.get("eb")!;
+    (room as any).fires.push({ owner: a.sessionId, team: pa.team, kind: "molotov", x: 177, y: 5, z: -20.1, r: 3.6, dps: 24, until: room.state.clock + 5, tick: 0 });
+    await until(() => buggy.hp < VEHICLE_TYPES.buggy.hp, 1500, "burning");
   });
 });

@@ -12,7 +12,7 @@ import { MapSchema, ArraySchema } from "@colyseus/schema";
 
 import { VehicleState, type MatchState, type PlayerState } from "./rooms/schema/MatchState.js";
 import { VEHICLE_ENTER_RANGE, VEHICLE_MAX_SPEED, VEHICLE_SLACK, WORLD_BOUND } from "./constants.js";
-import { VEHICLE_DAMAGE, VEHICLE_SPAWNS, VEHICLE_TYPES, type WorldId } from "./rules.js";
+import { VEHICLE_DAMAGE, VEHICLE_PARKING, VEHICLE_SPAWNS, VEHICLE_TYPES, type WorldId } from "./rules.js";
 
 export const PARKED_Y = -100; // VehicleState.y before its first pose: on the ground at its spawn
 
@@ -20,7 +20,8 @@ const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : n
 
 // Server-side bookkeeping per vehicle (never synced).
 export interface VehicleMeta {
-  spawn: { x: number; z: number; yaw: number };
+  home: { x: number; z: number; yaw: number }; // its camp spot (VEHICLE_SPAWNS)
+  spawn: { x: number; z: number; yaw: number }; // where this one was parked (home, or a VEHICLE_PARKING spot)
   at: number; // ms of the last accepted pose
   x: number;
   z: number;
@@ -30,26 +31,31 @@ export interface VehicleMeta {
 
 export class Vehicles {
   meta = new Map<string, VehicleMeta>();
+  private world: WorldId = "coral";
   constructor(private state: MatchState) {}
 
   // The round's vehicles for `world` (everyone unseated first).
   spawn(world: WorldId) {
     this.clear();
+    this.world = world;
     for (const sp of VEHICLE_SPAWNS[world] ?? []) {
       const v = new VehicleState();
       v.type = sp.type;
       v.seats = new ArraySchema<string>(...Array.from({ length: VEHICLE_TYPES[sp.type]?.seats ?? 1 }, () => ""));
       this.state.vehicles.set(sp.id, v);
-      this.meta.set(sp.id, { spawn: { x: sp.x, z: sp.z, yaw: sp.yaw }, at: 0, x: sp.x, z: sp.z, lastHitBy: "", respawnAt: 0 });
+      const home = { x: sp.x, z: sp.z, yaw: sp.yaw };
+      this.meta.set(sp.id, { home, spawn: home, at: 0, x: sp.x, z: sp.z, lastHitBy: "", respawnAt: 0 });
       this.park(sp.id);
     }
   }
 
-  // A new vehicle at its spawn: parked, full health, nobody in it or simulating it.
-  private park(id: string) {
+  // A new vehicle at `spot` (default: where the last one was parked): parked, full health, nobody in
+  // it or simulating it.
+  private park(id: string, spot?: { x: number; z: number; yaw: number }) {
     const v = this.state.vehicles.get(id);
     const m = this.meta.get(id);
     if (!v || !m) return;
+    if (spot) m.spawn = spot;
     for (const p of this.state.players.values()) if (p.veh === id) (p.veh = ""), (p.seat = -1);
     v.x = m.spawn.x;
     v.z = m.spawn.z;
@@ -111,16 +117,40 @@ export class Vehicles {
     return true;
   }
 
+  // Where a wreck's replacement goes: of its home spot and the world's VEHICLE_PARKING spots, those
+  // inside the zone (`inZone`) and clear of other vehicles, the nearest to home; with none inside,
+  // the one deepest in the zone.
+  private respawnSpot(id: string, inZone: (x: number, z: number) => number) {
+    const m = this.meta.get(id)!;
+    const clear = (x: number, z: number) => {
+      for (const [oid, o] of this.state.vehicles) if (oid !== id && Math.hypot(o.x - x, o.z - z) < 8) return false;
+      return true;
+    };
+    let best = m.home;
+    let score = Infinity;
+    for (const sp of [m.home, ...(VEHICLE_PARKING[this.world] ?? [])]) {
+      if (!clear(sp.x, sp.z)) continue;
+      const out = inZone(sp.x, sp.z); // m outside the zone's edge (negative inside)
+      const s = out < -12 ? Math.hypot(sp.x - m.home.x, sp.z - m.home.z) : 1e6 + out;
+      if (s < score) {
+        score = s;
+        best = sp;
+      }
+    }
+    return best;
+  }
+
   // Once per server tick in a round: burning vehicles lose health (returns those that just burnt
-  // out, with who to credit) and wrecks past their time are replaced.
-  tick(dt: number, clock: number): { id: string; by: string }[] {
+  // out, with who to credit) and wrecks past their time are replaced (inside the zone: `inZone`
+  // gives how far (m) a point is outside its edge).
+  tick(dt: number, clock: number, inZone: (x: number, z: number) => number = () => -1e9): { id: string; by: string }[] {
     const out: { id: string; by: string }[] = [];
     for (const [id, v] of this.state.vehicles) {
       const m = this.meta.get(id);
       if (!m) continue;
       if (v.wreck) {
         if (m.respawnAt && clock >= m.respawnAt) {
-          this.park(id);
+          this.park(id, this.respawnSpot(id, inZone));
           v.life = (v.life + 1) & 0xff; // a new one: every client rebuilds it
         }
         continue;

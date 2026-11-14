@@ -60,6 +60,8 @@ interface Session {
   heartsGiven: Map<string, number>; // target sessionId -> hearts given this round
   reactAt: number; // ms of the last spectator reaction
   roundRevives: number; // teammates this player revived this round (missions)
+  roundWrecks: number; // vehicles this player destroyed this round (missions)
+  roundRams: number; // enemies this player ran over this round (missions)
   profileAt: number; // ms of the last public profile request
 }
 
@@ -576,6 +578,8 @@ export class MatchRoom extends Room<{ state: MatchState }> {
       lastElimAt: -99,
       roundGems: 0,
       roundRevives: 0,
+      roundWrecks: 0,
+      roundRams: 0,
       zoneTick: 0,
       shotSeq: new Map(),
       shotAt: new Map(),
@@ -914,6 +918,8 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     s.lastElimAt = -99;
     s.roundGems = 0;
     s.roundRevives = 0;
+    s.roundWrecks = 0;
+    s.roundRams = 0;
     s.damagers.clear();
     s.playedRound = s.lastSeat = this.state.round;
     this.applyLoadout(p, s);
@@ -1174,7 +1180,10 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     const clock = st.clock;
     this.zone.update(clock);
     if (this.fires.length) this.burnFires(dt);
-    if (this.state.vehicles.size) for (const w of this.vehicles.tick(dt, clock)) this.wreckVehicle(w.id, w.by || null);
+    if (this.state.vehicles.size) {
+      const inZone = (x: number, z: number) => Math.hypot(x - this.zone.cx, z - this.zone.cz) - this.zone.radius;
+      for (const w of this.vehicles.tick(dt, clock, inZone)) this.wreckVehicle(w.id, w.by || null);
+    }
     // Opened crates refill.
     for (const [k, at] of st.crates) if (clock >= at) st.crates.delete(k);
     // Supply drops over the zone.
@@ -1337,6 +1346,8 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     if (!v || !at) return;
     const seated = new Set([...v.seats].filter(Boolean));
     for (const sid of seated) this.vehicles.eject(sid);
+    const by = attackerId ? this.sessions.get(attackerId) : undefined;
+    if (by && this.state.phase === "playing") by.roundWrecks++;
     const y = at.parked ? 0 : at.y;
     this.broadcast("vboom", { v: id, x: at.x, y: at.parked ? -100 : at.y, z: at.z, a: attackerId ?? "" });
     const a = attackerId ? this.state.players.get(attackerId) : undefined;
@@ -1371,7 +1382,7 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     if (now - (s.ramAt.get(tid) ?? 0) < R.gapMs) return;
     s.ramAt.set(tid, now);
     this.broadcast("ram", { t: tid, v: id, x: Math.round(v.vx * 10) / 10, z: Math.round(v.vz * 10) / 10 });
-    this.applyDamage(tid, Math.min(R.max, R.base + (speed - R.minSpeed) * R.perMs), sessionId, { weapon: v.type });
+    if (this.applyDamage(tid, Math.min(R.max, R.base + (speed - R.minSpeed) * R.perMs), sessionId, { weapon: v.type }) > 0 && this.state.phase === "playing") s.roundRams++;
   }
 
   // Burning patches: every FIRE_TICK s, anyone standing in one (not the thrower's teammates; the
@@ -1387,6 +1398,13 @@ export class MatchRoom extends Room<{ state: MatchState }> {
       f.tick -= dt;
       if (f.tick > 0) continue;
       f.tick += FIRE_TICK;
+      // Vehicles parked or driven over it burn too (not one the thrower's side sits in).
+      for (const [id] of this.state.vehicles) {
+        if (!this.vehicles.canHurt(id, f.team, f.owner)) continue;
+        const at = this.vehicles.where(id)!;
+        if (Math.hypot(at.x - f.x, at.z - f.z) > f.r + VEHICLE_DAMAGE.size || (!at.parked && Math.abs(at.y - f.y) > 3)) continue;
+        this.hurtVehicle(id, f.dps * FIRE_TICK * VEHICLE_DAMAGE.fire, f.owner);
+      }
       for (const [tid, t] of this.inRound()) {
         if (t.life === "dead" || (tid !== f.owner && t.team === f.team)) continue;
         if (Math.hypot(t.x - f.x, t.z - f.z) > f.r || Math.abs(t.y - f.y) > 2.2) continue;
@@ -1620,6 +1638,8 @@ export class MatchRoom extends Room<{ state: MatchState }> {
       headshots: r.headshots,
       assists: r.assists,
       revives: s.roundRevives,
+      wrecks: s.roundWrecks,
+      rams: s.roundRams,
     });
     const rankUp = payRankUps(pr);
     const pl = this.state.players.get(sessionId);

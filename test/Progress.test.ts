@@ -15,7 +15,7 @@ import { testServer } from "./server.js";
 Object.assign(PHASES, { vote: 0.1, intro: 0.05, countdown: 0.05, ending: 0.05, results: 0.2 });
 Object.assign(TIMING, { spawnGraceMs: 0, joinGraceMs: 0 });
 
-const NONE = { play: 0, win: 0, elims: 0, knocks: 0, damage: 0, headshots: 0, assists: 0, revives: 0 };
+const NONE = { play: 0, win: 0, elims: 0, knocks: 0, damage: 0, headshots: 0, assists: 0, revives: 0, wrecks: 0, rams: 0 };
 
 describe("missions and rank rewards (progress.ts)", () => {
   it("rolls a daily set each UTC day and a weekly set each Monday", () => {
