@@ -129,10 +129,11 @@ Extra rule fields: `melee` (a blow: melee range slack, never a headshot), `pierc
 - `ITEMS`: `frag` `{ damage 170, radius 6.5, fuse 1.9 }`, `medkit` `{ heal 80, time 2.2 }`.
 - `OPERATIVES` (`duration`, `charge`): `rook` 6/50, `nova` 6/45, `jin` 0/40, `shade` 5/55. Only `duration` is used by the server. `ROOK_DAMAGE_TAKEN` 0.55, `JIN_HEAL` `{ self 90, ally 60, range 10 }`, `ULT_MIN_GAP_S` 18.
 - `MODES`: `clash` (Team Clash, 240 s, score 45), `squad` (Squad Showdown, 180 s, score 25).
-- `MAP_FOCUS`: `[0,0]` Villa, `[-66,34]` Old Farm, `[-98,-14]` Dockyard; `MAP_COUNT` = its length.
+- `MAPS` (`{ world, focus }`, the client's `MAPS` order): `coral [0,0]` Villa, `coral [-66,34]` Old Farm, `coral [-98,-14]` Dockyard, `ridge [0,0]` Dustline Ridge (its own, larger island); `MAP_FOCUS` (the focus list) and `MAP_COUNT` follow from it.
 - `PHASES` (seconds, mutable object): `vote` 15, `intro` 3.2, `countdown` 4, `ending` 2.4, `results` 12.
 - `STREAK_WINDOW` 6 s, `ASSIST_WINDOW` 10 s.
-- `ISLAND_RADIUS` 125; `ZONE`: `start` 150, `phases` `[{at 35, shrink 30, radius 105}, {at 95, shrink 30, radius 72}, {at 160, shrink 30, radius 46}]`, `damage` `[4, 7, 11]` HP per second outside.
+- `ISLAND_RADIUS` 125; `ZONE` (Coral Key's plan, type `ZonePlan`): `start` 150, `phases` `[{at 35, shrink 30, radius 105}, {at 95, shrink 30, radius 72}, {at 160, shrink 30, radius 46}]`, `damage` `[4, 7, 11]` HP per second outside.
+- `WORLDS` (client `config.js WORLDS`): per world the land `radius` and the zone plan. `coral` = `ISLAND_RADIUS` + `ZONE`; `ridge` = radius 250, `start` 330, phases `[{at 30, shrink 35, radius 190}, {at 95, shrink 35, radius 115}, {at 160, shrink 30, radius 60}]`, damage `[4, 7, 11]`.
 - `LOOT`: `crates` 200 (accepted crate indexes), `respawn` 40 s, `airdropAt` `[70, 150]`, `airdropFall` 9 s.
 - `REWARDS`: `perElimination` 12, `perKnock` 3, `perDamage` 1/25, `win` 70, `loss` 25, `mvp` 30, `rpWin` 40, `rpLoss` -12, `rpPerElim` 3, `leavePenaltyRp` -12, `forfeitMinShare` 0.5 (a side that leaves before this share of the round's duration makes it a no contest). The client's `config.js REWARDS` mirrors these (its leave dialog quotes `leavePenaltyRp`).
 - `LEVEL` + `levelOf(stats)`: xp = matches x 20 + wins x 20 + eliminations x 10, level = 1 + floor(sqrt(xp / 50)), max 999 (state `level`). `REACTIONS`: the spectator reaction ids (`laugh`, `fire`, `clap`, `wow`, `gg`; client `config.js REACTIONS`).
@@ -306,7 +307,7 @@ Helpers used everywhere: `player(client)`, `fighting()` (phase is `playing` or `
 `startRound()`:
 1. `map` = most-voted map among ready players (random among none); `mode` = most common valid `voteMode` (fallback `clash`). `tally` breaks ties with coin flips.
 2. `duration` = the mode's (or `ROUND_SECONDS` outside production), `scoreToWin`, `round++`, `clock = 0`, scores 0, `winner = ""`.
-3. `zoneSeed` = random uint32; `zone = new Zone(zoneSeed, MAP_FOCUS[map])`; `crates` and `drops` cleared; `nextDrop = 0`.
+3. `zoneSeed` = random uint32; `zone = new Zone(zoneSeed, MAPS[map].focus, MAPS[map].world)` (that world's plan and land radius); `crates` and `drops` cleared; `nextDrop = 0`. Crate indexes are per world (each client builds the voted world's list); `LOOT.crates` 200 bounds them for every world (Coral Key has 52, Dustline Ridge 60).
 4. Teams: every ready player's team cleared, the list shuffled, then stable-sorted by `Session.lastSeat` (the last round that seated them; lowest first, so players who sat out go first), `pickTeam` for each in turn. Only the first `2 x TEAM_MAX` (6) get a team and a `resetForRound`; the rest stay `inMatch` with no team (the client keeps showing the queue panel) and are tried again next round.
 5. Phase `intro`; `resetForRound` for each (scoreboard zeroed, streak/damagers reset, `playedRound = round`, `applyLoadout`, `spawn(first = true)`); broadcast `round { round }`.
 
@@ -508,7 +509,7 @@ Adding a test: create `test/<name>.test.ts` (matched by the glob), get the serve
 - Skin: `SKIN_PRICES` + client `SKINS`. Operative: `OPERATIVE_PRICES`, `rules.ts OPERATIVES` + client `OPERATIVES`. Store upgrade/emote: `STORE` + client `STORE`; a new emote id also goes in `EMOTES`, `EMOTE_RE` (in `MatchRoom.ts`) and the client's `ANIM.emotes`. An upgrade needs its effect implemented (`armor` is the only one the server applies, in `spawn`; `medkits`/`walls`/`frags` are applied by the client's `match.js kit`). Coins only; never add a premium-currency price.
 
 **Add a map to the vote**
-- Append to `rules.ts MAP_FOCUS` and to the client's `MAPS` at the same index (`id`, `name`, `mood`, `tint`, `focus`, `shot`). `MAP_COUNT` follows. The `focus` must be identical on both sides or the zones diverge.
+- Append to `rules.ts MAPS` (`world`, `focus`) and to the client's `MAPS` at the same index (`id`, `world`, `name`, `mood`, `tint`, `focus`, `shot`). `MAP_COUNT` follows. The `world` and `focus` must be identical on both sides or the zones diverge. A new world also needs a `WORLDS` entry here and in the client's `config.js` (and its builder on the client); `test/Zone.test.ts` checks every map names a world and the circles stay over its land.
 
 **Change round length, phase lengths or team size**
 - Round length/score: `rules.ts MODES` + client `MATCH_MODES`. Check `ZONE.phases` and `LOOT.airdropAt` against the new duration.
@@ -532,7 +533,7 @@ Adding a test: create `test/<name>.test.ts` (matched by the glob), get the serve
 - `PHASES` and `TIMING` must stay mutable objects (tests assign into them).
 - `rules.MODES` (record with rules) and `catalog.MODES` (id list) are separate; a new mode goes in both.
 - `state.crates` keys are strings; drop ids are never reused within a room.
-- The zone planner, `ZONE`, `ISLAND_RADIUS` and `MAP_FOCUS` are a wire contract with the client (`protocol.md` section 7).
+- The zone planner, `WORLDS` (`ZONE`, `ISLAND_RADIUS`) and `MAPS` are a wire contract with the client (`protocol.md` section 7).
 - The server cannot see crate positions, ammo, item counts or ability charge; do not write logic that assumes it can.
 - A guest's profile lives in memory for the session only (600 starting coins each time).
 - `onAuth` never rejects, so a room never refuses a join for identity reasons.

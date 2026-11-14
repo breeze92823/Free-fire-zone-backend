@@ -6,7 +6,7 @@ import {
   PFP_MAX_LEN, PROFILE_GAP_MS, RANGE_SLACK, REACT_GAP_MS, RECONNECT_SECONDS, RESPAWN_MIN_S, REPLACED_CODE, ROOM_MAX_CLIENTS, SHOT_POINTS_MAX, SQUAD_MAX, TEAM_MAX, TICK_MS, TIMING, WORLD_BOUND,
 } from "../constants.js";
 import {
-  ASSIST_WINDOW, FIRE_TICK, GEMS, GRENADES, HEALTH, ITEMS, JIN_HEAL, LOOT, MAP_COUNT, MAP_FOCUS, MODES, OPERATIVES, PAN_BEHIND_COS, PHASES, REACTIONS, REWARDS, ROOK_DAMAGE_TAKEN,
+  ASSIST_WINDOW, FIRE_TICK, GEMS, GRENADES, HEALTH, ITEMS, JIN_HEAL, LOOT, MAP_COUNT, MAPS, MODES, OPERATIVES, PAN_BEHIND_COS, PHASES, REACTIONS, REWARDS, ROOK_DAMAGE_TAKEN,
   STREAK_WINDOW, ULT_MIN_GAP_S, WEAPONS, GEMS_MAX, damageFalloff, levelOf,
 } from "../rules.js";
 import { Zone } from "../zone.js";
@@ -997,7 +997,7 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     st.winner = "";
     this.forfeit = false;
     st.zoneSeed = (Math.random() * 0xffffffff) >>> 0;
-    this.zone = new Zone(st.zoneSeed, MAP_FOCUS[st.map]);
+    this.zone = new Zone(st.zoneSeed, MAPS[st.map].focus, MAPS[st.map].world);
     st.crates.clear();
     st.drops.clear();
     this.nextDrop = 0;

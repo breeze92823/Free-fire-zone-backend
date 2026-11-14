@@ -1,9 +1,10 @@
-import { ISLAND_RADIUS, ZONE } from "./rules.js";
+import { WORLDS, type WorldId, type ZonePlan } from "./rules.js";
 
 // The safe zone on the round clock, from the round's seed. The client (src/game/zone.js) runs the
 // same planner with the same seeded random numbers, so both agree on every circle without the
 // server streaming it. Two random numbers per phase, in this order: angle, distance. Each circle
 // heads for the voted map's district (focus), jittered around it, never leaving the last circle.
+// The plan (start radius, phases, damage) and the land radius are the map's world's (WORLDS).
 
 export function mulberry32(seed: number): () => number {
   let a = seed >>> 0;
@@ -19,22 +20,29 @@ export function mulberry32(seed: number): () => number {
 export class Zone {
   cx = 0;
   cz = 0;
-  radius = ZONE.start;
+  radius: number;
   private fromX = 0;
   private fromZ = 0;
-  private fromR = ZONE.start;
+  private fromR: number;
   private nextX = 0;
   private nextZ = 0;
-  private nextR = ZONE.start;
+  private nextR: number;
   phase = -1;
   shrinking = false;
-  damage = ZONE.damage[0];
+  damage: number;
   private rand: () => number;
 
   private focusX: number;
   private focusZ: number;
+  private plan: ZonePlan;
+  private landR: number;
 
-  constructor(seed: number, focus: [number, number] = [0, 0]) {
+  constructor(seed: number, focus: [number, number] = [0, 0], world: WorldId = "coral") {
+    const w = WORLDS[world] ?? WORLDS.coral;
+    this.plan = w.zone;
+    this.landR = w.radius;
+    this.radius = this.fromR = this.nextR = this.plan.start;
+    this.damage = this.plan.damage[0];
     this.rand = mulberry32(seed);
     this.focusX = focus[0];
     this.focusZ = focus[1];
@@ -42,7 +50,7 @@ export class Zone {
   }
 
   private planNext(i: number) {
-    const p = ZONE.phases[i];
+    const p = this.plan.phases[i];
     const slack = Math.max(0, this.radius - p.radius);
     const a = this.rand() * Math.PI * 2;
     const j = Math.sqrt(this.rand()) * p.radius * 0.45;
@@ -52,7 +60,7 @@ export class Zone {
     const d = Math.min(len0, slack * 0.85);
     let x = this.cx + (len0 > 0 ? (tx / len0) * d : 0);
     let z = this.cz + (len0 > 0 ? (tz / len0) * d : 0);
-    const maxC = Math.max(0, ISLAND_RADIUS - p.radius * 0.6);
+    const maxC = Math.max(0, this.landR - p.radius * 0.6);
     const len = Math.hypot(x, z);
     if (len > maxC && len > 0) {
       x = (x / len) * maxC;
@@ -65,6 +73,7 @@ export class Zone {
 
   update(t: number) {
     const nextI = this.phase + 1;
+    const ZONE = this.plan;
     if (!this.shrinking && nextI < ZONE.phases.length && t >= ZONE.phases[nextI].at) {
       this.phase = nextI;
       this.shrinking = true;

@@ -122,14 +122,18 @@ export const MODES: Record<string, { name: string; duration: number; scoreToWin:
   clash: { name: "Team Clash", duration: 240, scoreToWin: 45 },
   squad: { name: "Squad Showdown", duration: 180, scoreToWin: 25 },
 };
-// The voted maps (client MAPS, same order): a district of Coral Key + a time of day. The safe zone
-// closes in on the map's district (zone.ts), so each map plays out somewhere else on the island.
-export const MAP_FOCUS: [number, number][] = [
-  [0, 0], // The Villa · day
-  [-66, 34], // Old Farm · sunset
-  [-98, -14], // Dockyard · night
+// The voted maps (client MAPS, same order): a world (WORLDS) + where on it the safe zone closes in
+// (zone.ts) + (client only) a time of day. The first three are districts of Coral Key; Dustline Ridge
+// is its own, larger island.
+export type WorldId = "coral" | "ridge";
+export const MAPS: { world: WorldId; focus: [number, number] }[] = [
+  { world: "coral", focus: [0, 0] }, // The Villa · day
+  { world: "coral", focus: [-66, 34] }, // Old Farm · sunset
+  { world: "coral", focus: [-98, -14] }, // Dockyard · night
+  { world: "ridge", focus: [0, 0] }, // Dustline Ridge · desert
 ];
-export const MAP_COUNT = MAP_FOCUS.length;
+export const MAP_FOCUS: [number, number][] = MAPS.map((m) => m.focus);
+export const MAP_COUNT = MAPS.length;
 
 // Round phases, seconds each (playing lasts the mode's duration).
 export const PHASES = {
@@ -142,9 +146,16 @@ export const PHASES = {
 export const STREAK_WINDOW = 6;
 export const ASSIST_WINDOW = 10;
 
-// The safe zone (client zone.js, same seeded random sequence: zone.ts).
-export const ISLAND_RADIUS = 125;
-export const ZONE = {
+// The safe zone (client zone.js, same seeded random sequence: zone.ts). Each world has its own plan
+// and land radius (client config.js WORLDS): the circles never centre further out than
+// radius - 0.6 x their own radius.
+export interface ZonePlan {
+  start: number;
+  phases: { at: number; shrink: number; radius: number }[];
+  damage: number[];
+}
+export const ISLAND_RADIUS = 125; // Coral Key
+export const ZONE: ZonePlan = {
   start: 150,
   phases: [
     { at: 35, shrink: 30, radius: 105 },
@@ -152,6 +163,21 @@ export const ZONE = {
     { at: 160, shrink: 30, radius: 46 },
   ],
   damage: [4, 7, 11],
+};
+export const WORLDS: Record<WorldId, { radius: number; zone: ZonePlan }> = {
+  coral: { radius: ISLAND_RADIUS, zone: ZONE },
+  ridge: {
+    radius: 250,
+    zone: {
+      start: 330,
+      phases: [
+        { at: 30, shrink: 35, radius: 190 },
+        { at: 95, shrink: 35, radius: 115 },
+        { at: 160, shrink: 30, radius: 60 },
+      ],
+      damage: [4, 7, 11],
+    },
+  },
 };
 
 export const LOOT = {

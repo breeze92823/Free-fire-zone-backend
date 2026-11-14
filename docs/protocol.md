@@ -146,8 +146,8 @@ Field definitions are in `server.md` section 4. `net.state` is read directly eac
 | `phase`, `phaseLeft` | `main.js syncFlow` (phase transitions, countdown), `queueInfo` (vote timer), `enterRound` (late-join intro/countdown progress) |
 | `clock` | `online.js syncClock` -> `G.time` (hard snap when off by more than 0.4 s, else eased); `match.js createMatch` |
 | `duration`, `mode`, `scoreToWin`, `round` | `match.js createMatch`; `duration` also in `online.js applyState` |
-| `map` | `main.js enterRound` -> `MAPS[map]` (mood, zone focus, flyover) |
-| `zoneSeed` | `match.js createMatch` -> `zone.reset(seed, map.focus)` |
+| `map` | `main.js enterRound` -> `MAPS[map]` (its world: built and activated first, mood, zone focus, flyover) |
+| `zoneSeed` | `match.js createMatch` -> `zone.reset(seed, map.focus, map.world)` |
 | `blue`, `orange` | `online.js applyState` -> `G.match.score` |
 | `winner` | `main.js showRoundResults` |
 | `crates` | `online.js syncLoot` -> `loot.js syncCrates`, once on entering a round (later changes arrive as `opened`; refills run on the local clock) |
@@ -193,17 +193,17 @@ Receiving (`online.js applyRemote`): a snapshot `{ t, x, y, z, yaw, pitch }` is 
 The server never streams the circle. Both sides compute it from `state.zoneSeed`, the voted map's focus and the round clock.
 
 - Generator: `mulberry32(seed)` (identical code in `zone.ts` and the client's `game/zone.js`): 32-bit state, returns a float in `[0, 1)`.
-- Inputs: `seed = state.zoneSeed` (uint32, new each round); `focus = MAP_FOCUS[state.map]` on the server = `MAPS[state.map].focus` on the client; `ZONE` (`start`, `phases`, `damage`); island radius 125 (`ISLAND_RADIUS` / the client's `G.island.radius`).
-- Start: centre `(0, 0)`, radius `ZONE.start` (150), `phase = -1`. Server: `new Zone(seed, focus)`. Client: `zone.reset(seed, focus)` in `match.js createMatch`. Both immediately call `planNext(0)`.
+- Inputs: `seed = state.zoneSeed` (uint32, new each round); `focus = MAPS[state.map].focus` on both sides; the plan (`start`, `phases`, `damage`) and the land radius of the map's world, `WORLDS[MAPS[state.map].world]` on both sides (Coral Key: `ZONE`, 125; Dustline Ridge: start 330, radius 250).
+- Start: centre `(0, 0)`, radius `plan.start`, `phase = -1`. Server: `new Zone(seed, focus, world)`. Client: `zone.reset(seed, focus, world)` in `match.js createMatch`. Both immediately call `planNext(0)`.
 - `planNext(i)` is the only consumer of random numbers, exactly two per call, in this order:
   1. `a = rand() * 2 * PI` (angle);
   2. `j = sqrt(rand()) * phases[i].radius * 0.45` (jitter distance around the focus).
-  Then: target = focus + `(cos a, sin a) * j`; move from the current centre toward it by at most `0.85 * max(0, currentRadius - phases[i].radius)`; clamp the result to within `max(0, 125 - phases[i].radius * 0.6)` of the origin; the next radius is `phases[i].radius`.
+  Then: target = focus + `(cos a, sin a) * j`; move from the current centre toward it by at most `0.85 * max(0, currentRadius - phases[i].radius)`; clamp the result to within `max(0, landRadius - phases[i].radius * 0.6)` of the origin; the next radius is `phases[i].radius`.
 - `update(t)`: when not shrinking and `t >= phases[next].at`, the phase starts (from = current, `damage = ZONE.damage[min(phase, last)]`). While shrinking, centre and radius are linear in `k = min(1, (t - at) / shrink)`; at `k >= 1` the shrink ends and `planNext(phase + 1)` runs if there is another phase.
 - Total draws per round: 2 per phase (6 with the current 3 phases), always in phase order. A late joiner converges in at most one `update` per elapsed phase, because each finished phase ends exactly on its planned circle.
-- Server use: `zone.outside(x, z)` for zone damage (`ZONE.damage` per second outside). Client use: drawing, HUD timer, spawn-point choice; the client applies no zone damage itself.
+- Server use: `zone.outside(x, z)` for zone damage (the plan's `damage` per second outside). Client use: drawing, HUD timer, spawn-point choice; the client applies no zone damage itself.
 
-Lockstep rule: any change to `mulberry32`, the order or number of `rand()` calls, the arithmetic in `planNext` / `update`, `ZONE`, the island radius or a map focus must be made in both `zone.ts` + `rules.ts` and the client's `game/zone.js` + `config.js` (`ZONE`, `MAPS`) + `world/index.js` (`radius`). Airdrop positions are not part of this: they use `Math.random` on the server and travel in `state.drops`.
+Lockstep rule: any change to `mulberry32`, the order or number of `rand()` calls, the arithmetic in `planNext` / `update`, a world's plan or radius, or a map's world or focus must be made in both `zone.ts` + `rules.ts` (`WORLDS`, `MAPS`) and the client's `game/zone.js` + `config.js` (`WORLDS`, `ZONE`, `MAPS`). Airdrop positions are not part of this: they use `Math.random` on the server and travel in `state.drops`.
 
 ## 8. Mirrored values
 
@@ -226,9 +226,9 @@ Values that exist on both sides and must be changed together. Status is from com
 | Modes (`name`, `duration`, `scoreToWin`) | `MATCH_MODES` | `rules.ts MODES`, `catalog.ts MODES` | agree |
 | Phase lengths | `MATCH.voteTime` 15, `introFlyover` 3.2, `countdown` 4, `endSlowmo` 2.4 | `PHASES` (plus `results` 12) | agree; only `introFlyover` is read by client code |
 | Streak window | `MATCH.streakWindow` 6 (not read) | `STREAK_WINDOW` | agree |
-| Map focus points, order | `MAPS[i].focus` | `MAP_FOCUS[i]` | agree |
-| Zone (`start`, `phases`, `damage`) | `ZONE` | `ZONE` | agree |
-| Island radius | `world/index.js` (`radius: 125`) | `ISLAND_RADIUS` | agree |
+| Maps: world and focus, order | `MAPS[i].world`, `MAPS[i].focus` | `MAPS[i]` | agree |
+| Zone per world (`start`, `phases`, `damage`) | `WORLDS[id].zone` (`ZONE` for Coral Key) | `WORLDS[id].zone` (`ZONE`) | agree |
+| Land radius per world | `WORLDS[id].radius` (Coral Key 125 = `world/index.js radius`; Dustline Ridge 250 = `world/ridge/layout.js RADIUS`) | `WORLDS[id].radius` (`ISLAND_RADIUS`) | agree |
 | Zone generator and planner | `game/zone.js` | `zone.ts` | agree |
 | Loot (`respawn`, `airdropAt`, `airdropFall`) | `LOOT` | `LOOT` | agree |
 | Rewards | `REWARDS` (not read; the HUD shows the amounts in `reward`) | `REWARDS` | agree |
