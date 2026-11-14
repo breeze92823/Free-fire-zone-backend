@@ -6,11 +6,11 @@ import {
   PFP_MAX_LEN, PROFILE_GAP_MS, RANGE_SLACK, REACT_GAP_MS, RECONNECT_SECONDS, RESPAWN_MIN_S, REPLACED_CODE, ROOM_MAX_CLIENTS, SHOT_POINTS_MAX, SQUAD_MAX, TEAM_MAX, TICK_MS, TIMING, WORLD_BOUND,
 } from "../constants.js";
 import {
-  ASSIST_WINDOW, GEMS, GRENADES, HEALTH, ITEMS, JIN_HEAL, LOOT, MAP_COUNT, MAP_FOCUS, MODES, OPERATIVES, PHASES, REACTIONS, REWARDS, ROOK_DAMAGE_TAKEN, STREAK_WINDOW,
-  ULT_MIN_GAP_S, WEAPONS, GEMS_MAX, damageFalloff, levelOf,
+  ASSIST_WINDOW, FIRE_TICK, GEMS, GRENADES, HEALTH, ITEMS, JIN_HEAL, LOOT, MAP_COUNT, MAP_FOCUS, MODES, OPERATIVES, PAN_BEHIND_COS, PHASES, REACTIONS, REWARDS, ROOK_DAMAGE_TAKEN,
+  STREAK_WINDOW, ULT_MIN_GAP_S, WEAPONS, GEMS_MAX, damageFalloff, levelOf,
 } from "../rules.js";
 import { Zone } from "../zone.js";
-import { buy, equip, normalizeProfile, skinFor, type Profile } from "../catalog.js";
+import { NEWS_MAX, buy, equip, normalizeProfile, skinFor, type Profile } from "../catalog.js";
 import { loadProfile, saveProfile } from "../db.js";
 import { claimMission, countRound, payRankUps, refreshMissions } from "../progress.js";
 import { OUTFIT_KEY, reportId, verifyToken, type Identity } from "../auth.js";
@@ -37,6 +37,9 @@ interface Session {
   zoneTick: number;
   shotSeq: Map<string, number>; // weapon -> last shot sequence number
   shotAt: Map<string, number>; // weapon -> ms of that shot
+  burstAt: Map<string, number>; // weapon -> ms the current burst (or single shot) started
+  burstN: Map<string, number>; // weapon -> shots counted in that burst
+  blastAt: Map<string, number>; // launcher -> ms of its last reported blast
   throws: number; // frags thrown and not yet exploded
   throwKind: string; // the grenade type of the last throw (GRENADES)
   lastThrowAt: number; // ms
@@ -56,6 +59,20 @@ interface Session {
   reactAt: number; // ms of the last spectator reaction
   roundRevives: number; // teammates this player revived this round (missions)
   profileAt: number; // ms of the last public profile request
+}
+
+// A burning Firebottle patch: who started it, where, how hot and until when (round clock).
+interface Fire {
+  owner: string; // sessionId
+  team: string;
+  kind: string; // GRENADES id (the kill feed's weapon)
+  x: number;
+  y: number;
+  z: number;
+  r: number;
+  dps: number;
+  until: number;
+  tick: number; // s to the next damage tick
 }
 
 // A pending squad invite (from the lobby's "Players online" list), answered by `inviteReply`.
@@ -89,6 +106,7 @@ export class MatchRoom extends Room<{ state: MatchState }> {
   private sessions = new Map<string, Session>();
   private zone = new Zone(1);
   private nextDrop = 0;
+  private fires: Fire[] = [];
   private dropId = 1;
   private invites = new Map<number, Invite>();
   private inviteSeq = 1;
@@ -254,6 +272,15 @@ export class MatchRoom extends Room<{ state: MatchState }> {
       s.profile.tutorial = true;
       await this.persist(client.sessionId);
     },
+    // The player closed the lobby announcement `id` (client config.js NEWS): it is not shown again on
+    // this account. Only ever moves forward.
+    newsSeen: async (client: Client, msg: { id?: unknown }) => {
+      const s = this.sessions.get(client.sessionId);
+      const id = num(msg?.id);
+      if (!s?.loaded || id === null || !Number.isInteger(id) || id <= s.profile.newsSeen || id > NEWS_MAX) return;
+      s.profile.newsSeen = id;
+      await this.persist(client.sessionId);
+    },
     equip: async (client: Client, msg: { kind?: unknown; id?: unknown; weapon?: unknown }) => {
       const s = this.sessions.get(client.sessionId);
       const p = this.player(client);
@@ -277,7 +304,10 @@ export class MatchRoom extends Room<{ state: MatchState }> {
       const o = pt(msg.o);
       const e = Array.isArray(msg.e) ? msg.e.slice(0, SHOT_POINTS_MAX).map(pt).filter(Boolean) : [];
       if (!o) return;
-      this.broadcast("shot", { id: client.sessionId, w: msg.w, o, e }, { except: client });
+      // A launched round (crossbow, launchers) carries its launch velocity for the others' copies.
+      const v = WEAPONS[msg.w]?.blast || msg.w === "quill" ? pt(msg.v) : null;
+      if (v && Math.hypot(v[0], v[1], v[2]) > 150) return;
+      this.broadcast("shot", v ? { id: client.sessionId, w: msg.w, o, e, v } : { id: client.sessionId, w: msg.w, o, e }, { except: client });
     },
     // The shooter's hit report: { t: target sessionId, w: weapon, s: shot number, n: pellets that
     // hit, h: of them on the head, d: distance (m) }. Knife and fists use it too (melee).
@@ -298,6 +328,8 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     },
     // The thrower's frag went off: { x, y, z, t: [sessionIds in the blast with line of sight] }.
     boom: (client: Client, msg: any) => this.onBoom(client.sessionId, msg),
+    // The shooter's launcher round went off: { w, s: shot number, x, y, z, t: [sessionIds caught] }.
+    blast: (client: Client, msg: any) => this.onBlast(client.sessionId, msg),
     wall: (client: Client, msg: any) => {
       const p = this.player(client);
       const s = this.sessions.get(client.sessionId);
@@ -523,6 +555,9 @@ export class MatchRoom extends Room<{ state: MatchState }> {
       zoneTick: 0,
       shotSeq: new Map(),
       shotAt: new Map(),
+      burstAt: new Map(),
+      burstN: new Map(),
+      blastAt: new Map(),
       throws: 0,
       throwKind: "frag",
       lastThrowAt: 0,
@@ -585,7 +620,7 @@ export class MatchRoom extends Room<{ state: MatchState }> {
   }
 
   private carries(p: PlayerState, w: string) {
-    return w === p.primary || w === p.secondary || w === "knife" || w === "fists";
+    return w === p.primary || w === p.secondary || w === (p.melee || "knife") || w === "fists";
   }
 
   private inRound() {
@@ -671,6 +706,7 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     const lo = s.profile.loadout;
     p.primary = lo.primary;
     p.secondary = lo.secondary;
+    p.melee = lo.melee || "knife";
     p.skinPrimary = skinFor(s.profile, lo.primary);
     p.skinSecondary = skinFor(s.profile, lo.secondary);
     p.operative = lo.operative;
@@ -965,6 +1001,7 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     st.crates.clear();
     st.drops.clear();
     this.nextDrop = 0;
+    this.fires = [];
     // Teams: shuffle, keep parties together, balance.
     for (const [, p] of ready) p.team = "";
     // Shuffle, then those who sat out the last round go first; whoever does not fit waits.
@@ -1083,6 +1120,7 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     if (st.phase === "playing") st.clock += dt;
     const clock = st.clock;
     this.zone.update(clock);
+    if (this.fires.length) this.burnFires(dt);
     // Opened crates refill.
     for (const [k, at] of st.crates) if (clock >= at) st.crates.delete(k);
     // Supply drops over the zone.
@@ -1133,11 +1171,19 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     const ally = t.team === a.team;
     if (ally && !rule.heal) return;
     // Fire rate: a new shot number must wait the weapon's interval (one shot may hit several players).
+    // A burst weapon may fire `burst` shots `burstGap` apart, then waits `interval` from the start of
+    // that burst.
     const seq = num(msg.s) ?? -1;
     const now = Date.now();
     if (s.shotSeq.get(w) !== seq) {
       const last = s.shotAt.get(w) ?? 0;
-      if (now - last < rule.interval * 1000 * FIRE_RATE_SLACK) return;
+      const start = s.burstAt.get(w) ?? 0;
+      const n = s.burstN.get(w) ?? 0;
+      if (now - start >= rule.interval * 1000 * FIRE_RATE_SLACK) {
+        s.burstAt.set(w, now);
+        s.burstN.set(w, 1);
+      } else if (rule.burst && n < rule.burst && now - last >= (rule.burstGap ?? 0) * 1000 * FIRE_RATE_SLACK) s.burstN.set(w, n + 1);
+      else return;
       s.shotSeq.set(w, seq);
       s.shotAt.set(w, now);
     }
@@ -1159,8 +1205,72 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     const h = melee ? 0 : clampN(Math.floor(num(msg.h) ?? 0), 0, n);
     const d = clampN(num(msg.d) ?? dist, 0, rule.range);
     const fall = melee ? 1 : damageFalloff(rule, d);
-    const amount = rule.damage * fall * ((n - h) + h * rule.headMul);
-    this.applyDamage(tid, amount, sessionId, { head: h > 0, weapon: w, pierce: rule.pierce });
+    let amount = rule.damage * fall * ((n - h) + h * rule.headMul);
+    // A frying pan on the target's back (in its melee slot, not in its hand) stops most of the body
+    // shots that come from behind.
+    let blocked = false;
+    const pan = WEAPONS[t.melee]?.block;
+    if (pan && !melee && h < n && t.slot !== 2 && t.life === "alive") {
+      const dx = a.x - t.x;
+      const dz = a.z - t.z;
+      const len = Math.hypot(dx, dz);
+      if (len > 0.5 && (Math.sin(t.yaw) * dx + Math.cos(t.yaw) * dz) / len < PAN_BEHIND_COS) {
+        const body = rule.damage * fall * (n - h);
+        amount -= body * pan;
+        blocked = true;
+      }
+    }
+    this.applyDamage(tid, amount, sessionId, { head: h > 0, weapon: w, pierce: rule.pierce, blocked });
+  }
+
+  // A launcher round went off where its shooter says; the players they list in the radius take the
+  // blast's damage (falling off to the edge; the shooter half of it), like a frag.
+  private onBlast(sessionId: string, msg: any) {
+    const a = this.state.players.get(sessionId);
+    const s = this.sessions.get(sessionId);
+    const w = typeof msg?.w === "string" ? msg.w : "";
+    const rule = WEAPONS[w];
+    if (!a || !s || !a.team || !rule?.blast || !this.fighting() || a.life !== "alive" || !this.carries(a, w)) return;
+    const x = num(msg?.x), y = num(msg?.y), z = num(msg?.z);
+    if (x === null || y === null || z === null || Math.hypot(x - a.x, z - a.z) > rule.range + RANGE_SLACK) return;
+    const now = Date.now();
+    if (now - (s.blastAt.get(w) ?? 0) < rule.interval * 1000 * FIRE_RATE_SLACK) return;
+    s.blastAt.set(w, now);
+    this.broadcast("blast", { id: sessionId, w, x, y, z }, { except: this.clients.find((c) => c.sessionId === sessionId) });
+    const targets: string[] = Array.isArray(msg?.t) ? msg.t.filter((v: unknown) => typeof v === "string").slice(0, ROOM_MAX_CLIENTS) : [];
+    const R = rule.blast;
+    for (const tid of new Set(targets)) {
+      const t = this.state.players.get(tid);
+      if (!t || t.life === "dead" || !t.team) continue;
+      if (tid !== sessionId && t.team === a.team) continue;
+      const dist = Math.hypot(t.x - x, t.y + 1 - y, t.z - z);
+      if (dist > R + 2) continue;
+      const k = Math.pow(1 - Math.min(dist, R) / R, 0.7);
+      const dmg = rule.damage * k * (tid === sessionId ? 0.5 : 1);
+      if (dmg > 0.5) this.applyDamage(tid, dmg, sessionId, { explosive: true, weapon: w });
+    }
+  }
+
+  // Burning patches: every FIRE_TICK s, anyone standing in one (not the thrower's teammates; the
+  // thrower takes half) burns. Armour does not help (explosive, like a frag).
+  private burnFires(dt: number) {
+    const clock = this.state.clock;
+    for (let i = this.fires.length - 1; i >= 0; i--) {
+      const f = this.fires[i];
+      if (clock >= f.until) {
+        this.fires.splice(i, 1);
+        continue;
+      }
+      f.tick -= dt;
+      if (f.tick > 0) continue;
+      f.tick += FIRE_TICK;
+      for (const [tid, t] of this.inRound()) {
+        if (t.life === "dead" || (tid !== f.owner && t.team === f.team)) continue;
+        if (Math.hypot(t.x - f.x, t.z - f.z) > f.r || Math.abs(t.y - f.y) > 2.2) continue;
+        const dmg = f.dps * FIRE_TICK * (tid === f.owner ? 0.5 : 1);
+        this.applyDamage(tid, dmg, f.owner, { explosive: true, weapon: f.kind });
+      }
+    }
   }
 
   private onBoom(sessionId: string, msg: any) {
@@ -1171,7 +1281,14 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     const x = num(msg?.x), y = num(msg?.y), z = num(msg?.z);
     if (x === null || y === null || z === null || Math.hypot(x - a.x, z - a.z) > 60) return;
     s.throws--;
-    this.broadcast("boom", { id: sessionId, x, y, z }, { except: this.clients.find((c) => c.sessionId === sessionId) });
+    const kind = s.throwKind in GRENADES ? s.throwKind : "frag";
+    this.broadcast("boom", { id: sessionId, x, y, z, k: kind }, { except: this.clients.find((c) => c.sessionId === sessionId) });
+    // A Firebottle starts a burning patch (burnFires); smoke and stun grenades do no damage.
+    if (g.effect === "fire") {
+      this.fires.push({ owner: sessionId, team: a.team, kind, x, y, z, r: g.radius, dps: g.damage, until: this.state.clock + (g.burn ?? 6), tick: 0.15 });
+      return;
+    }
+    if (g.effect === "smoke" || g.effect === "flash") return;
     const targets: string[] = Array.isArray(msg?.t) ? msg.t.filter((v: unknown) => typeof v === "string").slice(0, ROOM_MAX_CLIENTS) : [];
     const R = g.radius;
     for (const tid of new Set(targets)) {
@@ -1182,12 +1299,12 @@ export class MatchRoom extends Room<{ state: MatchState }> {
       if (dist > R + 2) continue;
       const k = Math.pow(1 - Math.min(dist, R) / R, 0.7);
       const dmg = g.damage * k * (tid === sessionId ? 0.5 : 1);
-      if (dmg > 0.5) this.applyDamage(tid, dmg, sessionId, { explosive: true, weapon: "frag" });
+      if (dmg > 0.5) this.applyDamage(tid, dmg, sessionId, { explosive: true, weapon: kind });
     }
   }
 
   // Armour, knock-down and elimination, as the client's combat.js once did it locally.
-  private applyDamage(targetId: string, amount: number, attackerId: string | null, opts: { head?: boolean; zone?: boolean; explosive?: boolean; weapon?: string; pierce?: number }) {
+  private applyDamage(targetId: string, amount: number, attackerId: string | null, opts: { head?: boolean; zone?: boolean; explosive?: boolean; weapon?: string; pierce?: number; blocked?: boolean }) {
     const st = this.state;
     const t = st.players.get(targetId);
     const ts = this.sessions.get(targetId);
@@ -1219,7 +1336,7 @@ export class MatchRoom extends Room<{ state: MatchState }> {
       if (opts.head) a.headshots++;
     }
     t.emote = "";
-    this.broadcast("dmg", { t: targetId, a: attackerId ?? "", n: Math.round(dmg * 10) / 10, h: !!opts.head, z: !!opts.zone, e: !!opts.explosive });
+    this.broadcast("dmg", opts.blocked ? { t: targetId, a: attackerId ?? "", n: Math.round(dmg * 10) / 10, h: !!opts.head, z: !!opts.zone, e: !!opts.explosive, b: true } : { t: targetId, a: attackerId ?? "", n: Math.round(dmg * 10) / 10, h: !!opts.head, z: !!opts.zone, e: !!opts.explosive });
     if (t.life === "alive") {
       t.hp -= dmg;
       if (t.hp <= 0) {

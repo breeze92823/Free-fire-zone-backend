@@ -121,7 +121,8 @@ Game rules the server enforces; a hand-kept copy of the client's `src/config.js`
 | `fists` | fists | 22 | 0.42 | 2.1 | 1 | `melee` |
 
 Extra rule fields: `melee` (a blow: melee range slack, never a headshot), `pierce` (share of the vest / helmet damage cut ignored: the Kestrel's armour-piercing rounds), `heal` (HP a hit gives a teammate: the Mender's hits on allies heal instead of being refused).
-- `GRENADES` (the loadout's throwable, `onBoom`): `frag` `{ damage 170, radius 6.5, fuse 1.9 }`, `pulse` `{ 120, 8.5, 1.2 }`, `breach` `{ 230, 5, 2.4 }`.
+- `GRENADES` (the loadout's throwable, `onBoom`): `frag` `{ damage 170, radius 6.5, fuse 1.9 }`, `pulse` `{ 120, 8.5, 1.2 }`, `breach` `{ 230, 5, 2.4 }`, `leech` `{ 185, 5, 2, effect sticky }`, `molotov` `{ 24 HP/s, 3.6, 5, effect fire, burn 7 s }`, `smoke` `{ 0, 6, 1.4, effect smoke }`, `flash` `{ 0, 15, 1.6, effect flash }`. `FIRE_TICK` 0.5 s (burn damage per tick = HP/s x tick). `PAN_BEHIND_COS` -0.45 (the pan's arc behind a player).
+- Weapon rules may also carry `burst` + `burstGap` (the Sentinel: 3 shots 0.06 s apart, `interval` from one burst to the next), `blast` (launchers: radius of the `blast` message's explosion) and `block` (the pan: share of body-shot damage from behind stopped while it is in the melee slot and not in hand).
 
 - `FALLOFF_START` 0.6 and `damageFalloff(w, dist)`: 1 up to 60% of range, then linear down to 0.6 at full range.
 - `HEALTH`: `max` 200, `regenDelay` 6 s, `regen` 4 HP/s, `regenCap` 120, `knockedHp` 80, `bleed` 5 HP/s, `reviveTime` 3 s, `reviveHp` 70, `reviveRange` 3.5 m, `vest` `[0, 0.18, 0.28, 0.38]`, `helmet` `[0, 0.22, 0.36, 0.5]`, `armorDurability` `[0, 180, 260, 340]`, `spawnProtection` 2.5 s.
@@ -147,7 +148,7 @@ Prices, the profile shape and the shop logic (pure functions, no I/O).
 - `OPERATIVE_PRICES`: rook 0, nova 1200, jin 1500, shade 2000.
 - `STORE` (`StoreItem[]`): upgrades (`max` 2 each) `medkits` 900, `walls` 1000, `frags` 1100, `armor` 2400; emotes `emote_dance` 500, `emote_salute` 350, `emote_flex` 650, `emote_cheer` 450 (each has `emote`: the emote id it unlocks). An upgrade's price is per level.
 - `EMOTES` `["wave","dance","salute","flex","cheer"]`; `MODES` `["clash","squad"]` (ids only; not the same export as `rules.MODES`).
-- `Profile`: `coins`, `gems`, `rp`, `owned { weapons, skins, operatives, emotes }`, `loadout { primary, secondary, operative, emote, skin: Record<weapon, skin> }`, `upgrades: Record<id, level>`, `stats { matches, wins, eliminations, deaths, damage, best }`, `mode`, `missions`, `rankReward`, `tutorial` (5.13).
+- `Profile`: `coins`, `gems`, `rp`, `owned { weapons, skins, operatives, emotes }`, `loadout { primary, secondary, operative, emote, skin: Record<weapon, skin> }`, `upgrades: Record<id, level>`, `stats { matches, wins, eliminations, deaths, damage, best }`, `mode`, `missions`, `rankReward`, `tutorial` (5.13), `newsSeen` (the newest lobby announcement the player closed; `normalizeProfile` keeps it as a number 0..`NEWS_MAX`, missing = 0).
 - `START_PROFILE`: 600 coins, 0 gems, 0 rp, owns striker/viper/knife/fists, skin standard, operative rook, emote wave, mode clash.
 - `COINS_MAX` 1e12, `GEMS_MAX` 1e9 (from `rules.ts`), `RP_MAX` 1e9 (applied when a stored document is normalized, not when rewards are granted).
 - `normalizeProfile(raw)`: builds a valid `Profile` from any stored document: numbers clamped and floored, unknown ids dropped, starter items always owned, equipped items must be owned and in the right slot, upgrade levels clamped to `max`, unknown `mode` falls back to `clash`. Anything it does not copy is lost on load.
@@ -268,6 +269,8 @@ Helpers used everywhere: `player(client)`, `fighting()` (phase is `playing` or `
 | `roundGems` | | Gems granted this round (already in `profile.gems`; reported in `rewards.gems`) |
 | `zoneTick` | s | accumulator for the once-a-second zone damage |
 | `shotSeq`, `shotAt` | wall ms | per weapon: last shot number and its time (fire rate) |
+| `burstAt`, `burstN` | wall ms | per weapon: when the current burst (or single shot) started and how many shots it has counted |
+| `blastAt` | wall ms | per launcher: the last accepted `blast` |
 | `throws`, `lastThrowAt` | wall ms | frags thrown and not yet exploded (max 3), last throw |
 | `lastHealAt`, `lastUltAt`, `lastWallAt`, `lastOpenAt` | wall ms | per-action rate limits |
 | `reviving` | wall ms | `{ target, at }` of a hold in progress |
@@ -343,7 +346,8 @@ Payload `{ t, w, s, n, h, d }`. Steps in order; any failure silently drops the h
 
 1. Attacker state and session exist, `t` is another player in the room, `w` is a key of `WEAPONS`, phase is `fighting()`.
 2. Attacker `life === "alive"` and has a team; target is not dead (knocked targets can be hit) and has a team; teams differ; `carries(attacker, w)`. The held `slot` is not checked.
-3. Fire rate, per weapon: `seq = s` (or -1). If `seq` differs from the last recorded shot number for `w`, the time since that shot must be at least `rule.interval * 1000 * FIRE_RATE_SLACK` ms; then `seq` and the time are recorded. A hit with the same `seq` as the recorded one skips the check (one shot may hit several players).
+3. Fire rate, per weapon: `seq = s` (or -1). If `seq` differs from the last recorded shot number for `w`, a new burst may start when `rule.interval * 1000 * FIRE_RATE_SLACK` ms have passed since the current one started; a burst weapon may also add a shot to the current burst (up to `rule.burst`) at least `burstGap * 1000 * FIRE_RATE_SLACK` ms after the last; otherwise the hit is refused. Then `seq` and the time are recorded. A hit with the same `seq` as the recorded one skips the check (one shot may hit several players). For a single-shot weapon this is the plain interval check.
+   The frying pan: when the target's `melee` has `block`, it is not holding it (`slot !== 2`), it is alive, and the shooter stands behind it (the cosine between its facing (`yaw`) and the direction to the shooter below `PAN_BEHIND_COS`), the body (non-head) part of a bullet's damage is cut by `block`; the `dmg` broadcast carries `b: true`.
 4. Range: 3D distance between the two server-side positions must be `<= rule.range + RANGE_SLACK` (guns) or `rule.range + 2.5` (knife, fists).
 5. `n` = pellets that hit, clamped to `1..(rule.pellets ?? 1)`; `h` = headshots among them, clamped to `0..n` (0 for melee); `d` = distance for falloff, the client's value clamped to `0..rule.range` (server distance when missing).
 6. `amount = rule.damage * falloff(d) * ((n - h) + h * rule.headMul)` (falloff is 1 for melee).
@@ -372,7 +376,9 @@ Not checked: line of sight, aim direction, ammo, reload, and that `t` was hit by
 
 - `shot`: relay only. Sender alive, `fighting()`, carries `w`; `o` must be 3 finite numbers; up to `SHOT_POINTS_MAX` valid points of `e`; all rounded to 2 decimals; broadcast to everyone else.
 - `throw`: alive, `fighting()`, at least 400 ms since the last throw; `throws = min(throws + 1, 3)`; relayed when `p` and `v` are valid 3-vectors.
-- `boom` (`onBoom`): the thrower need not still be alive. Requires `throws > 0`, the last throw at most `ITEMS.frag.fuse + 3` s ago, the blast within 60 m (horizontal) of the thrower's server position. `throws--`, `boom` relayed to the others. For each distinct id in `t` (max 18): target not dead, has a team, is an enemy or the thrower; distance from the blast to the target at `y + 1` must be `<= radius + 2`; damage `ITEMS.frag.damage * (1 - min(dist, R) / R) ^ 0.7`, halved for the thrower; applied when above 0.5 as `{ explosive: true, weapon: "frag" }` (body hit, so the vest applies).
+- `blast` (`onBlast`): a launcher round going off, reported by the shooter: alive, fighting, carries `w` with a `blast` radius, the point within `range + RANGE_SLACK` (horizontal) of the shooter, at most one per `interval * FIRE_RATE_SLACK`. Relayed to the others; each distinct listed target (enemy or the shooter, max `ROOM_MAX_CLIENTS`) within `blast + 2` m of the point (at `y + 1`) takes `damage * (1 - min(dist, R) / R) ^ 0.7`, halved for the shooter, explosive, `weapon: w`.
+- Fires (`fires`, `burnFires` on the tick): a `molotov` `boom` starts a patch `{ owner, team, kind, x, y, z, r, dps, until }` that lasts `burn` s (round clock); every `FIRE_TICK` s, every player in the round within `r` (horizontal, 2.2 m vertical) who is not the thrower's teammate takes `dps * FIRE_TICK` (half for the thrower), explosive, `weapon: "molotov"`. Cleared at the start of a round. Smoke and stun grenades (`effect` `smoke` / `flash`) are relayed and do no damage.
+- `boom` (`onBoom`): the thrower need not still be alive. Requires `throws > 0`, the last throw at most `ITEMS.frag.fuse + 3` s ago, the blast within 60 m (horizontal) of the thrower's server position. `throws--`, `boom` relayed to the others. For each distinct id in `t` (max 18): target not dead, has a team, is an enemy or the thrower; distance from the blast to the target at `y + 1` must be `<= radius + 2`; damage `ITEMS.frag.damage * (1 - min(dist, R) / R) ^ 0.7`, halved for the thrower; applied when above 0.5 as `{ explosive: true, weapon: <the grenade kind> }` (body hit, so the vest applies). The relay carries `k`, the kind.
 - `wall`: relay; alive, `fighting()`, 300 ms rate limit, placement within 8 m of the sender.
 - `heal`: alive, `fighting()`, at least `ITEMS.medkit.time * 800` ms (1760) since the last; `hp += ITEMS.medkit.heal` up to `HEALTH.max`.
 - `ult`: alive, `fighting()`, at least `ULT_MIN_GAP_S` since the last. `jin`: self +90, alive teammates within `JIN_HEAL.range + 2` m +60. Others: `ultUntil = clock + duration` (only `rook` has a server effect). Broadcast `ult` to everyone.
@@ -417,6 +423,7 @@ Not checked: line of sight, aim direction, ammo, reload, and that `t` was hit by
 - `claim { m, i }` -> `claimMission`: errors `loading`, `unknown`, `claimed`, `unfinished`; otherwise pays coins and Gems (capped at `GEMS_MAX`), answers `claimed`, sends `profile`, persists.
 - `payRankUps(profile)`: pays every rank above `profile.rankReward` that `rp` reaches, once. `normalizeProfile` sets a missing `rankReward` to the current rank (no back pay) and a missing `tutorial` to `stats.matches > 0`.
 - `tutorialDone`: sets `profile.tutorial` and persists.
+- `newsSeen { id }`: the lobby's "new arrivals" window was closed; sets `profile.newsSeen = id` when it is an integer above the stored value and at most `NEWS_MAX` (only ever moves forward), then persists. Test: `Arsenal.test.ts`.
 - Missions count whatever a round grants, so the round-reward weaknesses in section 12 (a forfeit win, `play` during `ending`) also advance `win` / `play` missions.
 - Tests: `test/Progress.test.ts` (rollover, counting, claim, forged data, rank pay-out, a round that finishes missions and a rank, a claim, `tutorialDone`).
 
@@ -470,6 +477,11 @@ All best-effort; failures are logged or swallowed, never thrown into the room.
 | Gems from a kill are saved to the account... | Gems added to a saved balance, written to the fake collection on leave, sent back in `profile` on the next join |
 | knocks when a teammate is standing... | knock, revive refused without the hold, revive after `reviving` + 2.6 s |
 | a frag's blast is the server's... | `boom` refused without `throw`, blast damage at close range |
+| `Arsenal.test.ts` burst fire | three quick shots per burst, a fourth refused, the next burst accepted |
+| `Arsenal.test.ts` launcher blast | a launcher not carried is refused; falloff; relayed; a second blast at once refused |
+| `Arsenal.test.ts` Firebottle | burns while standing in it, not outside; smoke does no damage |
+| `Arsenal.test.ts` melee slot | an owned machete replaces the knife, which is then not carried |
+| `Arsenal.test.ts` frying pan | 65% of a body shot from behind stopped (`dmg.b`), full damage from the front |
 | a second session of the same account... | close code 4100 for the older session (dev ids) |
 | shop: skins with coins, weapons with Gems... | `profile`, a skin bought with coins, a weapon refused with `gems` (coins never buy it), the skin `equip` reflected in state, save in the fake collection |
 | Gem shop: weapons, grenades and the pass cost Gems... | a weapon bought with Gems, the pass and a grenade refused when short, coins untouched, the pass unlocking its set, an unowned grenade refused by `equip` |

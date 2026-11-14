@@ -49,6 +49,7 @@ export const PlayerState = schema(
     // Loadout, from the server-side profile (never the client's word).
     primary: t.string().default("striker"),
     secondary: t.string().default("viper"),
+    melee: t.string().default("knife"), // the melee slot (knife, machete, crowbar, pan): the pan blocks shots from behind
     skinPrimary: t.string().default("standard"),
     skinSecondary: t.string().default("standard"),
     operative: t.string().default("rook"),

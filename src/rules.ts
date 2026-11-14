@@ -13,6 +13,10 @@ export interface WeaponRule {
   melee?: boolean; // a blade / fists blow (no headshots, melee range slack)
   pierce?: number; // share of the armour's damage cut ignored (0..1)
   heal?: number; // HP a hit gives a teammate (medic weapons); enemies take `damage`
+  burst?: number; // shots per trigger pull: `burstGap` s apart, `interval` from one burst's start to the next
+  burstGap?: number;
+  blast?: number; // launchers: the round goes off (`blast` message) with `damage` at the centre in this radius (m)
+  block?: number; // melee slot: carried on the back, it cuts this share of body-shot damage from behind (the pan)
 }
 
 export const WEAPONS: Record<string, WeaponRule> = {
@@ -31,15 +35,55 @@ export const WEAPONS: Record<string, WeaponRule> = {
   cyclone: { slot: "primary", damage: 14, pellets: 7, interval: 0.28, range: 24, headMul: 1.4 },
   ronin: { slot: "secondary", damage: 70, interval: 0.6, range: 3.2, headMul: 1, melee: true },
   mender: { slot: "secondary", damage: 12, interval: 0.25, range: 35, headMul: 1.5, heal: 10 },
+  // Second wave
+  gnat: { slot: "secondary", damage: 17, interval: 0.062, range: 50, headMul: 1.7 },
+  mantis: { slot: "secondary", damage: 21, interval: 0.08, range: 65, headMul: 1.8 },
+  drifter: { slot: "secondary", damage: 62, interval: 0.38, range: 110, headMul: 2.4 },
+  falcon: { slot: "primary", damage: 27, interval: 0.07, range: 120, headMul: 2 },
+  sentinel: { slot: "primary", damage: 38, interval: 0.34, range: 170, headMul: 2, burst: 3, burstGap: 0.06 },
+  sparrow: { slot: "primary", damage: 52, interval: 0.2, range: 220, headMul: 2.1 },
+  whisper: { slot: "primary", damage: 46, interval: 0.16, range: 120, headMul: 2.1 },
+  osprey: { slot: "primary", damage: 132, interval: 1.05, range: 330, headMul: 2.5 },
+  ranger: { slot: "primary", damage: 88, interval: 0.6, range: 200, headMul: 2.3 },
+  bulldog: { slot: "secondary", damage: 26, interval: 0.085, range: 65, headMul: 1.8 },
+  swarm: { slot: "secondary", damage: 18, interval: 0.06, range: 70, headMul: 1.7 },
+  sawback: { slot: "secondary", damage: 20, pellets: 8, interval: 0.25, range: 16, headMul: 1.4 },
+  rattler: { slot: "primary", damage: 17, pellets: 8, interval: 0.36, range: 26, headMul: 1.5 },
+  machete: { slot: "melee", damage: 78, interval: 0.7, range: 2.9, headMul: 1, melee: true },
+  crowbar: { slot: "melee", damage: 64, interval: 0.6, range: 2.6, headMul: 1, melee: true },
+  pan: { slot: "melee", damage: 58, interval: 0.62, range: 2.4, headMul: 1, melee: true, block: 0.65 },
+  quill: { slot: "primary", damage: 120, interval: 0.4, range: 160, headMul: 2.2 },
+  thumper: { slot: "primary", damage: 165, interval: 0.5, range: 120, headMul: 1, blast: 4.5 },
+  rhino: { slot: "primary", damage: 210, interval: 0.5, range: 220, headMul: 1, blast: 5.2 },
   knife: { slot: "melee", damage: 60, interval: 0.55, range: 2.7, headMul: 1, melee: true },
   fists: { slot: "fists", damage: 22, interval: 0.42, range: 2.1, headMul: 1, melee: true },
 };
 // Throwables (T). The loadout picks one; `frag` is the starter. Client config.js GRENADES.
-export const GRENADES: Record<string, { damage: number; radius: number; fuse: number }> = {
+// effect: "blast" (default: `damage` at the centre, falling off to the edge of `radius`), "sticky"
+// (a blast that sticks where it lands), "fire" (a burning patch: `damage` HP per second for `burn` s
+// to anyone standing in `radius`; the server burns them), "smoke" / "flash" (no damage: drawn by
+// the clients).
+export interface GrenadeRule {
+  damage: number;
+  radius: number;
+  fuse: number;
+  effect?: "blast" | "sticky" | "fire" | "smoke" | "flash";
+  burn?: number;
+}
+export const GRENADES: Record<string, GrenadeRule> = {
   frag: { damage: 170, radius: 6.5, fuse: 1.9 },
   pulse: { damage: 120, radius: 8.5, fuse: 1.2 },
   breach: { damage: 230, radius: 5, fuse: 2.4 },
+  leech: { damage: 185, radius: 5, fuse: 2, effect: "sticky" },
+  molotov: { damage: 24, radius: 3.6, fuse: 5, effect: "fire", burn: 7 },
+  smoke: { damage: 0, radius: 6, fuse: 1.4, effect: "smoke" },
+  flash: { damage: 0, radius: 15, fuse: 1.6, effect: "flash" },
 };
+// A fire burns in ticks of this many seconds (damage per tick = burn damage x tick).
+export const FIRE_TICK = 0.5;
+// The pan stops shots from behind: the angle between the target's facing and the direction to the
+// shooter must be wider than this (cos -0.45 ~ 117 degrees).
+export const PAN_BEHIND_COS = -0.45;
 export const FALLOFF_START = 0.6; // share of range after which damage falls to 60% at full range
 
 export const HEALTH = {

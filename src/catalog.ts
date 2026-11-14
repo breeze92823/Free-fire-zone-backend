@@ -26,11 +26,31 @@ export const WEAPON_PRICES: Record<string, { slot: "primary" | "secondary" | "me
   cyclone: { slot: "primary", price: 2600 },
   ronin: { slot: "secondary", price: 2500 },
   mender: { slot: "secondary", price: 3000 },
+  // Second wave
+  gnat: { slot: "secondary", price: 1100 },
+  mantis: { slot: "secondary", price: 1300 },
+  drifter: { slot: "secondary", price: 800 },
+  falcon: { slot: "primary", price: 2000 },
+  sentinel: { slot: "primary", price: 1900 },
+  sparrow: { slot: "primary", price: 2000 },
+  whisper: { slot: "primary", price: 2300 },
+  osprey: { slot: "primary", price: 2600 },
+  ranger: { slot: "primary", price: 1400 },
+  bulldog: { slot: "secondary", price: 1600 },
+  swarm: { slot: "secondary", price: 1700 },
+  sawback: { slot: "secondary", price: 1300 },
+  rattler: { slot: "primary", price: 1800 },
+  machete: { slot: "melee", price: 700 },
+  crowbar: { slot: "melee", price: 600 },
+  pan: { slot: "melee", price: 900 },
+  quill: { slot: "primary", price: 2100 },
+  thumper: { slot: "primary", price: 3200 },
+  rhino: { slot: "primary", price: 4000 },
   knife: { slot: "melee", price: 0 },
   fists: { slot: "fists", price: 0 },
 };
 // Throwables (T), in Gems; `frag` is the starter.
-export const GRENADE_PRICES: Record<string, number> = { frag: 0, pulse: 800, breach: 1200 };
+export const GRENADE_PRICES: Record<string, number> = { frag: 0, pulse: 800, breach: 1200, leech: 1000, molotov: 1100, smoke: 500, flash: 700 };
 // A pass unlocks a set of weapons for good (also ones added to it later), in Gems.
 export const PASSES: Record<string, { price: number; weapons: string[] }> = {
   basic: { price: 3500, weapons: ["hornet", "talon", "wasp", "ridgeback", "thunder", "breaker"] },
@@ -71,13 +91,14 @@ export interface Profile {
   gems: number; // the game's own currency, earned by eliminations (never bought)
   rp: number;
   owned: { weapons: string[]; skins: string[]; operatives: string[]; emotes: string[]; grenades: string[]; passes: string[] };
-  loadout: { primary: string; secondary: string; operative: string; emote: string; grenade: string; skin: Record<string, string> };
+  loadout: { primary: string; secondary: string; melee: string; operative: string; emote: string; grenade: string; skin: Record<string, string> };
   upgrades: Record<string, number>;
   stats: { matches: number; wins: number; eliminations: number; deaths: number; damage: number; best: number };
   mode: string;
   missions: Missions; // daily / weekly missions (progress.ts)
   rankReward: number; // highest RANKS index whose one-time reward was paid
   tutorial: boolean; // the first-round tips were finished (or skipped)
+  newsSeen: number; // the newest lobby announcement (client config.js NEWS.id) the player has closed
 }
 
 export const START_PROFILE: Profile = {
@@ -85,16 +106,18 @@ export const START_PROFILE: Profile = {
   gems: 0,
   rp: 0,
   owned: { weapons: ["striker", "viper", "knife", "fists"], skins: ["standard"], operatives: ["rook"], emotes: ["wave"], grenades: ["frag"], passes: [] },
-  loadout: { primary: "striker", secondary: "viper", operative: "rook", emote: "wave", grenade: "frag", skin: { striker: "standard", viper: "standard" } },
+  loadout: { primary: "striker", secondary: "viper", melee: "knife", operative: "rook", emote: "wave", grenade: "frag", skin: { striker: "standard", viper: "standard" } },
   upgrades: {},
   stats: { matches: 0, wins: 0, eliminations: 0, deaths: 0, damage: 0, best: 0 },
   mode: "clash",
   missions: emptyMissions(),
   rankReward: 0,
   tutorial: false,
+  newsSeen: 0,
 };
 
 export const COINS_MAX = 1e12;
+export const NEWS_MAX = 1e6; // announcement ids are small counters
 export const RP_MAX = 1e9;
 
 const clone = <T>(o: T): T => JSON.parse(JSON.stringify(o));
@@ -121,6 +144,7 @@ export function normalizeProfile(raw: any): Profile {
   const lo = raw.loadout ?? {};
   if (p.owned.weapons.includes(lo.primary) && WEAPON_PRICES[lo.primary].slot === "primary") p.loadout.primary = lo.primary;
   if (p.owned.weapons.includes(lo.secondary) && WEAPON_PRICES[lo.secondary].slot === "secondary") p.loadout.secondary = lo.secondary;
+  if (p.owned.weapons.includes(lo.melee) && WEAPON_PRICES[lo.melee].slot === "melee") p.loadout.melee = lo.melee;
   if (p.owned.operatives.includes(lo.operative)) p.loadout.operative = lo.operative;
   if (p.owned.emotes.includes(lo.emote)) p.loadout.emote = lo.emote;
   if (p.owned.grenades.includes(lo.grenade)) p.loadout.grenade = lo.grenade;
@@ -142,6 +166,7 @@ export function normalizeProfile(raw: any): Profile {
   p.rankReward = typeof raw.rankReward === "number" ? Math.max(0, Math.min(RANKS.length - 1, Math.floor(raw.rankReward))) : rankOf(p.rp);
   // Players who already finished a round before the tips existed do not get them.
   p.tutorial = raw.tutorial === true || (raw.tutorial === undefined && p.stats.matches > 0);
+  p.newsSeen = num(raw.newsSeen, NEWS_MAX);
   return p;
 }
 
@@ -223,6 +248,7 @@ export function equip(p: Profile, kind: unknown, id: unknown, weapon?: unknown):
     if (!w || !p.owned.weapons.includes(id)) return "locked";
     if (w.slot === "primary") p.loadout.primary = id;
     else if (w.slot === "secondary") p.loadout.secondary = id;
+    else if (w.slot === "melee") p.loadout.melee = id;
     else return "slot";
     return null;
   }
