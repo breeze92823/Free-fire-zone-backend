@@ -54,6 +54,8 @@ export const PlayerState = schema(
     skinSecondary: t.string().default("standard"),
     operative: t.string().default("rook"),
 
+    veh: t.string().default(""), // the vehicle id this player sits in ("" = none; vehicles.ts)
+    seat: t.int8().default(-1), // its seat index (0 = the driver), -1 = none
     emote: t.string().default(""), // playing now ("" = none), e.g. "wave" or "portal:<id>"
     ultUntil: t.float32().default(0), // round clock the ability ends (rook / nova / shade)
 
@@ -81,6 +83,31 @@ export const DropState = schema(
 );
 export type DropState = SchemaType<typeof DropState>;
 
+// A vehicle (vehicles.ts). Its pose comes from the client that simulates it (`owner`: the driver, or
+// the last driver until it reports it at rest); "" = nobody, every client keeps it parked where it is.
+// y = PARKED_Y (-100): never moved this round, each client puts it on the ground at x, z.
+export const VehicleState = schema(
+  {
+    type: t.string().default("jeep"),
+    x: t.float32().default(0),
+    y: t.float32().default(-100),
+    z: t.float32().default(0),
+    qx: t.float32().default(0),
+    qy: t.float32().default(0),
+    qz: t.float32().default(0),
+    qw: t.float32().default(1),
+    vx: t.float32().default(0),
+    vy: t.float32().default(0),
+    vz: t.float32().default(0),
+    steer: t.float32().default(0), // front wheel angle (rad), for the wheels on other screens
+    owner: t.string().default(""), // sessionId whose client simulates it
+    seats: t.array("string"), // sessionId per seat ("" = free); seats[0] = the driver
+    n: t.uint16().default(0), // bumped with every accepted pose (clients buffer on change)
+  },
+  "VehicleState",
+);
+export type VehicleState = SchemaType<typeof VehicleState>;
+
 export const MatchState = schema(
   {
     // waiting -> vote -> intro -> countdown -> playing -> ending -> results -> vote | waiting
@@ -99,6 +126,7 @@ export const MatchState = schema(
     players: t.map(PlayerState), // keyed by sessionId
     crates: t.map("float32"), // crate index -> round clock it refills (opened crates only)
     drops: t.array(DropState),
+    vehicles: t.map(VehicleState), // keyed by vehicle id (Dustline Ridge rounds)
   },
   "MatchState",
 );

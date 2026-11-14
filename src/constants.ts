@@ -40,6 +40,12 @@ export const WORLD_BOUND = 400;
 // the slack added for network jitter (m). A pose beyond it is ignored (the player is not moved).
 export const MAX_SPEED = 32;
 export const MOVE_SLACK = 6;
+// Vehicles (vehicles.ts): the fastest a vehicle (and anyone seated in it) may move between two poses,
+// m/s (the buggy tops out at 29 on the flat; downhill and jumps go faster), plus its jitter slack (m);
+// how far (m, horizontal) a player may be from a vehicle to get in.
+export const VEHICLE_MAX_SPEED = 45;
+export const VEHICLE_SLACK = 8;
+export const VEHICLE_ENTER_RANGE = 6;
 // Hit checks run against the server's last known positions, which trail the shooter's view.
 export const RANGE_SLACK = 12;
 // A shot may come this much faster than the weapon's fire interval (jitter, bunched packets).

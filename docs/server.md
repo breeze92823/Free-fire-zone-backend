@@ -307,7 +307,7 @@ Helpers used everywhere: `player(client)`, `fighting()` (phase is `playing` or `
 `startRound()`:
 1. `map` = most-voted map among ready players (random among none); `mode` = most common valid `voteMode` (fallback `clash`). `tally` breaks ties with coin flips.
 2. `duration` = the mode's (or `ROUND_SECONDS` outside production), `scoreToWin`, `round++`, `clock = 0`, scores 0, `winner = ""`.
-3. `zoneSeed` = random uint32; `zone = new Zone(zoneSeed, MAPS[map].focus, MAPS[map].world)` (that world's plan and land radius); `crates` and `drops` cleared; `nextDrop = 0`. Crate indexes are per world (each client builds the voted world's list); `LOOT.crates` 200 bounds them for every world (Coral Key has 52, Dustline Ridge 60).
+3. `zoneSeed` = random uint32; `zone = new Zone(zoneSeed, MAPS[map].focus, MAPS[map].world)` (that world's plan and land radius); `vehicles.spawn(world)` (5.9b); `crates` and `drops` cleared; `nextDrop = 0`. Crate indexes are per world (each client builds the voted world's list); `LOOT.crates` 200 bounds them for every world (Coral Key has 52, Dustline Ridge 60).
 4. Teams: every ready player's team cleared, the list shuffled, then stable-sorted by `Session.lastSeat` (the last round that seated them; lowest first, so players who sat out go first), `pickTeam` for each in turn. Only the first `2 x TEAM_MAX` (6) get a team and a `resetForRound`; the rest stay `inMatch` with no team (the client keeps showing the queue panel) and are tried again next round.
 5. Phase `intro`; `resetForRound` for each (scoreboard zeroed, streak/damagers reset, `playedRound = round`, `applyLoadout`, `spawn(first = true)`); broadcast `round { round }`.
 
@@ -338,6 +338,8 @@ Helpers used everywhere: `player(client)`, `fighting()` (phase is `playing` or `
    - Zone (only in `playing`, not dead): while `zone.outside(x, z)` accumulate `zoneTick`; each full second `applyDamage(zone.damage, null, { zone: true })`. Zone damage ignores armour and spawn protection and never knocks: an alive player at 0 HP is eliminated.
 
 ### 5.6 Poses (`pose`)
+
+(Seated in a vehicle the speed limit is `VEHICLE_MAX_SPEED * dt + VEHICLE_SLACK`: 5.9b.)
 
 Checks, in order: all of `x`, `y`, `z` finite; `|x|`, `|z|` <= `WORLD_BOUND`, `-60 <= y <= 300`; then, if there is a previous pose, the grace window is over and the player is not dead: horizontal distance moved must be `<= MAX_SPEED * dt + MOVE_SLACK` with `dt = max(0.05, seconds since the last accepted pose)`. A failing pose is dropped (nothing is sent back; the player simply is not moved). Accepted: position stored; `yaw` (any finite), `pitch` clamped to +-1.6, `speed` to 0..60, `flags` to 0..65535, `slot` to 0..3; a running emote is cleared when `speed > 1.2`. Grace windows: `TIMING.joinGraceMs` after join, `TIMING.spawnGraceMs` after every spawn, 3 s after a reconnect.
 
@@ -392,6 +394,21 @@ Not checked: line of sight, aim direction, ammo, reload, and that `t` was hit by
   - `{ c }`: index `0 <= c < LOOT.crates`. Already open -> `openFail { c }` to the sender. Otherwise `crates[c] = clock + LOOT.respawn`, a 45% chance of +1 armour level (the vest if `vest <= helmet` and below 3, else the helmet if below 3), broadcast `opened { c, by }`.
   - `{ d }`: unknown, already opened or still falling -> `openFail { d }`. Otherwise `opened = true`, vest and helmet set to 3, broadcast `opened { d, by }`.
   - The server does not know crate positions; ammo and utility items inside are the client's.
+
+### 5.9b Vehicles (`src/vehicles.ts`, class `Vehicles`, `this.vehicles` in the room)
+
+Dustline Ridge rounds have four vehicles (`rules.ts VEHICLE_SPAWNS.ridge`: a Jeep and a Dune Buggy in each camp's vehicle bay; anyone may take any). The server owns the seats; each vehicle's pose comes from the client that simulates it, its `owner`.
+
+| When | What |
+| --- | --- |
+| `startRound` | `spawn(world)`: everyone unseated, the map cleared, the world's vehicles created with `y = PARKED_Y` (-100: each client parks it on the ground), the yaw in `qy` / `qw`, `seats` sized by `VEHICLE_TYPES` |
+| `enter { v, s }` | `enter(sid, p, v, s)`: phase `playing`, alive, in the round, not seated, the seat free, within `VEHICLE_ENTER_RANGE` (6 m) of the vehicle on the server's positions. Seat 0 = driver = `owner` |
+| `exit`, knock, eliminate, `spawn` | `eject(sid)`: out of the seat (and out of any seat naming them). The owner keeps simulating the vehicle it left |
+| `leaveMatch` (leave, or a disconnect past the reconnect window) | `release(sid)`: ejected, and every vehicle it owned passes to its current driver or to nobody |
+| `vpose` | `pose(sid, msg)`: only from the owner; bounds as player poses; speed `VEHICLE_MAX_SPEED * dt + VEHICLE_SLACK` against the last accepted pose (`meta`: time and position per vehicle) except a jump back to its own spawn; writes the pose, bumps `n`; `r: 1` with nobody driving clears `owner` |
+| results end | `clear()` |
+
+Seated players' own poses (`pose`) are checked against the vehicle limit instead of `MAX_SPEED` (5.6). Bullets ignore vehicles for now, and nobody is hurt by one (cover, vehicle health, ramming are the next milestone). Tests: `test/Vehicles.test.ts`.
 
 ### 5.10 Map vote, rewards, Gems, leaving penalty
 

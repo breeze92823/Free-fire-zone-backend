@@ -135,6 +135,23 @@ export const MAPS: { world: WorldId; focus: [number, number] }[] = [
 export const MAP_FOCUS: [number, number][] = MAPS.map((m) => m.focus);
 export const MAP_COUNT = MAPS.length;
 
+// Vehicles (vehicles.ts; client config.js VEHICLES): seats per type, and where each world's are parked
+// at the start of a round (yaw: 0 = facing +z, PI/2 = +x). Dustline Ridge: a Jeep and a Dune Buggy
+// in each camp's vehicle bay (West Camp = blue, East Camp = orange; anyone may take any).
+export const VEHICLE_TYPES: Record<string, { seats: number }> = {
+  jeep: { seats: 4 },
+  buggy: { seats: 2 },
+};
+export const VEHICLE_SPAWNS: Record<WorldId, { id: string; type: string; x: number; z: number; yaw: number }[]> = {
+  coral: [],
+  ridge: [
+    { id: "wj", type: "jeep", x: -177, z: 9.9, yaw: Math.PI / 2 },
+    { id: "wb", type: "buggy", x: -177, z: 20.1, yaw: Math.PI / 2 },
+    { id: "ej", type: "jeep", x: 177, z: -9.9, yaw: -Math.PI / 2 },
+    { id: "eb", type: "buggy", x: 177, z: -20.1, yaw: -Math.PI / 2 },
+  ],
+};
+
 // Round phases, seconds each (playing lasts the mode's duration).
 export const PHASES = {
   vote: 15, // client MATCH.voteTime

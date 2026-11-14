@@ -2,7 +2,7 @@ import { Room, Client, CloseCode } from "colyseus";
 
 import { DropState, MatchState, PlayerState } from "./schema/MatchState.js";
 import {
-  AVATAR_MAX_LEN, FIRE_RATE_SLACK, GUEST_ID_PREFIX, HEART_GAP_MS, HEARTS_PER_TARGET, INVITE_GAP_MS, INVITE_MAX_PENDING, INVITE_TTL_S, MIN_PLAYERS, MOVE_SLACK, MAX_SPEED, NAME_MAX, PARTY_MAX_LEN, PATCH_MS,
+  AVATAR_MAX_LEN, FIRE_RATE_SLACK, GUEST_ID_PREFIX, HEART_GAP_MS, HEARTS_PER_TARGET, INVITE_GAP_MS, INVITE_MAX_PENDING, INVITE_TTL_S, MIN_PLAYERS, MOVE_SLACK, MAX_SPEED, VEHICLE_MAX_SPEED, VEHICLE_SLACK, NAME_MAX, PARTY_MAX_LEN, PATCH_MS,
   PFP_MAX_LEN, PROFILE_GAP_MS, RANGE_SLACK, REACT_GAP_MS, RECONNECT_SECONDS, RESPAWN_MIN_S, REPLACED_CODE, ROOM_MAX_CLIENTS, SHOT_POINTS_MAX, SQUAD_MAX, TEAM_MAX, TICK_MS, TIMING, WORLD_BOUND,
 } from "../constants.js";
 import {
@@ -10,6 +10,7 @@ import {
   STREAK_WINDOW, ULT_MIN_GAP_S, WEAPONS, GEMS_MAX, damageFalloff, levelOf,
 } from "../rules.js";
 import { Zone } from "../zone.js";
+import { Vehicles } from "../vehicles.js";
 import { NEWS_MAX, buy, equip, normalizeProfile, skinFor, type Profile } from "../catalog.js";
 import { loadProfile, saveProfile } from "../db.js";
 import { claimMission, countRound, payRankUps, refreshMissions } from "../progress.js";
@@ -105,6 +106,7 @@ export class MatchRoom extends Room<{ state: MatchState }> {
 
   private sessions = new Map<string, Session>();
   private zone = new Zone(1);
+  private vehicles = new Vehicles(this.state); // seats + vehicle poses (vehicles.ts)
   private nextDrop = 0;
   private fires: Fire[] = [];
   private dropId = 1;
@@ -184,7 +186,9 @@ export class MatchRoom extends Room<{ state: MatchState }> {
       if (s.pose && now > s.graceUntil && p.life !== "dead") {
         const dt = Math.max(0.05, (now - s.pose.at) / 1000);
         const moved = Math.hypot(x - s.pose.x, z - s.pose.z);
-        if (moved > MAX_SPEED * dt + MOVE_SLACK) return; // a teleport: not accepted
+        // Seated in a vehicle: the vehicle's limit (vehicles.ts checks the vehicle's own poses).
+        const limit = p.veh ? VEHICLE_MAX_SPEED * dt + VEHICLE_SLACK : MAX_SPEED * dt + MOVE_SLACK;
+        if (moved > limit) return; // a teleport: not accepted
       }
       s.pose = { x, y, z, at: now };
       p.x = x;
@@ -197,6 +201,21 @@ export class MatchRoom extends Room<{ state: MatchState }> {
       const slot = num(msg.slot);
       if (slot !== null) p.slot = clampN(Math.floor(slot), 0, 3);
       if (p.emote && p.speed > 1.2) p.emote = "";
+    },
+    // --- Vehicles (vehicles.ts) --------------------------------------------------------------------
+    // { v: vehicle id, s: seat }: in a running round, alive, close enough, the seat free.
+    enter: (client: Client, msg: { v?: unknown; s?: unknown }) => {
+      const p = this.player(client);
+      if (!p || this.state.phase !== "playing") return;
+      this.vehicles.enter(client.sessionId, p, msg?.v, msg?.s);
+    },
+    exit: (client: Client) => {
+      this.vehicles.eject(client.sessionId);
+    },
+    // The vehicle's pose from the client that simulates it (its owner).
+    vpose: (client: Client, msg: any) => {
+      if (!this.fighting()) return;
+      this.vehicles.pose(client.sessionId, msg);
     },
     // The player's Bloxity look for the others to draw: { avatar: JSON of ids (never URLs), outfitKey }.
     avatar: (client: Client, msg: { avatar?: unknown; outfitKey?: unknown }) => {
@@ -873,6 +892,7 @@ export class MatchRoom extends Room<{ state: MatchState }> {
 
   // Back to full health with the starting armour. `first`: the round's opening spawn.
   private spawn(sessionId: string, p: PlayerState, s: Session, first: boolean) {
+    this.vehicles.eject(sessionId);
     const armorLv = s.profile.upgrades.armor ? 1 + s.profile.upgrades.armor : 0;
     p.life = "alive";
     p.hp = HEALTH.max;
@@ -946,6 +966,7 @@ export class MatchRoom extends Room<{ state: MatchState }> {
       this.grant(sessionId, s, r, false);
       void this.persist(sessionId);
     }
+    this.vehicles.release(sessionId);
     p.inMatch = false;
     p.team = "";
     p.life = "dead";
@@ -998,6 +1019,7 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     this.forfeit = false;
     st.zoneSeed = (Math.random() * 0xffffffff) >>> 0;
     this.zone = new Zone(st.zoneSeed, MAPS[st.map].focus, MAPS[st.map].world);
+    this.vehicles.spawn(MAPS[st.map].world); // parked in the camps (none on Coral Key)
     st.crates.clear();
     st.drops.clear();
     this.nextDrop = 0;
@@ -1104,6 +1126,7 @@ export class MatchRoom extends Room<{ state: MatchState }> {
       case "results":
         st.phaseLeft -= dt;
         if (st.phaseLeft <= 0) {
+          this.vehicles.clear();
           for (const p of st.players.values()) {
             p.team = "";
             p.life = "dead";
@@ -1358,6 +1381,7 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     t.life = "knocked";
     t.downHp = HEALTH.knockedHp;
     t.emote = "";
+    this.vehicles.eject(targetId); // knocked out of the seat
     const a = attackerId ? this.state.players.get(attackerId) : undefined;
     if (a && attackerId !== targetId) a.knocks++;
     this.broadcast("knock", { t: targetId, a: attackerId ?? "", w: opts.weapon ?? "", h: !!opts.head });
@@ -1372,6 +1396,7 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     const t = st.players.get(targetId);
     const ts = this.sessions.get(targetId);
     if (!t || !ts || t.life === "dead") return;
+    this.vehicles.eject(targetId);
     t.life = "dead";
     t.hp = 0;
     t.downHp = 0;
