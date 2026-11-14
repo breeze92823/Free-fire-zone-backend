@@ -61,3 +61,11 @@ export const GUEST_ID_PREFIX = "guest_";
 // Leaderboard / stats reporting cadence (docs: batch every 10-30 s and at round end).
 export const REPORT_EVERY_MS = 20_000;
 export const REPORT_BATCH = 200;
+
+// Spectating (eliminated players watch others): one heart per HEART_GAP_MS from a spectator and at
+// most HEARTS_PER_TARGET to one player per round; one reaction per REACT_GAP_MS; one public profile
+// request per PROFILE_GAP_MS.
+export const HEART_GAP_MS = 400;
+export const HEARTS_PER_TARGET = 20;
+export const REACT_GAP_MS = 1200;
+export const PROFILE_GAP_MS = 400;

@@ -2,16 +2,17 @@ import { Room, Client, CloseCode } from "colyseus";
 
 import { DropState, MatchState, PlayerState } from "./schema/MatchState.js";
 import {
-  AVATAR_MAX_LEN, FIRE_RATE_SLACK, GUEST_ID_PREFIX, INVITE_GAP_MS, INVITE_MAX_PENDING, INVITE_TTL_S, MIN_PLAYERS, MOVE_SLACK, MAX_SPEED, NAME_MAX, PARTY_MAX_LEN, PATCH_MS,
-  PFP_MAX_LEN, RANGE_SLACK, RECONNECT_SECONDS, RESPAWN_MIN_S, REPLACED_CODE, ROOM_MAX_CLIENTS, SHOT_POINTS_MAX, SQUAD_MAX, TEAM_MAX, TICK_MS, TIMING, WORLD_BOUND,
+  AVATAR_MAX_LEN, FIRE_RATE_SLACK, GUEST_ID_PREFIX, HEART_GAP_MS, HEARTS_PER_TARGET, INVITE_GAP_MS, INVITE_MAX_PENDING, INVITE_TTL_S, MIN_PLAYERS, MOVE_SLACK, MAX_SPEED, NAME_MAX, PARTY_MAX_LEN, PATCH_MS,
+  PFP_MAX_LEN, PROFILE_GAP_MS, RANGE_SLACK, REACT_GAP_MS, RECONNECT_SECONDS, RESPAWN_MIN_S, REPLACED_CODE, ROOM_MAX_CLIENTS, SHOT_POINTS_MAX, SQUAD_MAX, TEAM_MAX, TICK_MS, TIMING, WORLD_BOUND,
 } from "../constants.js";
 import {
-  ASSIST_WINDOW, GEMS, GRENADES, HEALTH, ITEMS, JIN_HEAL, LOOT, MAP_COUNT, MAP_FOCUS, MODES, OPERATIVES, PHASES, REWARDS, ROOK_DAMAGE_TAKEN, STREAK_WINDOW,
-  ULT_MIN_GAP_S, WEAPONS, GEMS_MAX, damageFalloff,
+  ASSIST_WINDOW, GEMS, GRENADES, HEALTH, ITEMS, JIN_HEAL, LOOT, MAP_COUNT, MAP_FOCUS, MODES, OPERATIVES, PHASES, REACTIONS, REWARDS, ROOK_DAMAGE_TAKEN, STREAK_WINDOW,
+  ULT_MIN_GAP_S, WEAPONS, GEMS_MAX, damageFalloff, levelOf,
 } from "../rules.js";
 import { Zone } from "../zone.js";
 import { buy, equip, normalizeProfile, skinFor, type Profile } from "../catalog.js";
 import { loadProfile, saveProfile } from "../db.js";
+import { claimMission, countRound, payRankUps, refreshMissions } from "../progress.js";
 import { OUTFIT_KEY, reportId, verifyToken, type Identity } from "../auth.js";
 import { flushReports, queueScores, queueStats } from "../reporters.js";
 
@@ -50,6 +51,11 @@ interface Session {
   playedRound: number; // round index this player fought in (rewards, leave penalty)
   lastSeat: number; // the last round that seated this player (not reset at the end): sat-out players get seats first
   lastInviteAt: number; // ms of the last squad invite sent
+  heartAt: number; // ms of the last heart given (spectating)
+  heartsGiven: Map<string, number>; // target sessionId -> hearts given this round
+  reactAt: number; // ms of the last spectator reaction
+  roundRevives: number; // teammates this player revived this round (missions)
+  profileAt: number; // ms of the last public profile request
 }
 
 // A pending squad invite (from the lobby's "Players online" list), answered by `inviteReply`.
@@ -229,6 +235,24 @@ export class MatchRoom extends Room<{ state: MatchState }> {
         await this.persist(client.sessionId);
       }
     },
+    // A finished mission's reward: { m: "daily" | "weekly", i: slot index } -> `claimed`.
+    claim: async (client: Client, msg: { m?: unknown; i?: unknown }) => {
+      const s = this.sessions.get(client.sessionId);
+      if (!s) return;
+      if (!s.loaded) return client.send("claimed", { m: msg?.m, i: msg?.i, error: "loading" });
+      refreshMissions(s.profile.missions);
+      const r = claimMission(s.profile, msg?.m, msg?.i);
+      client.send("claimed", { m: msg?.m, i: msg?.i, ...r });
+      this.sendProfile(client, s);
+      if (!("error" in r)) await this.persist(client.sessionId);
+    },
+    // The first-round tips were finished or skipped: never shown again on this account.
+    tutorialDone: async (client: Client) => {
+      const s = this.sessions.get(client.sessionId);
+      if (!s?.loaded || s.profile.tutorial) return;
+      s.profile.tutorial = true;
+      await this.persist(client.sessionId);
+    },
     equip: async (client: Client, msg: { kind?: unknown; id?: unknown; weapon?: unknown }) => {
       const s = this.sessions.get(client.sessionId);
       const p = this.player(client);
@@ -307,7 +331,7 @@ export class MatchRoom extends Room<{ state: MatchState }> {
           if (o !== p && o.team === p.team && o.life === "alive" && Math.hypot(o.x - p.x, o.z - p.z) < JIN_HEAL.range + 2) o.hp = Math.min(HEALTH.max, o.hp + JIN_HEAL.ally);
         }
       } else p.ultUntil = this.state.clock + OPERATIVES[op].duration;
-      this.broadcast("ult", { id: client.sessionId, op });
+      this.broadcast("ult", { id: client.sessionId, op }, { except: client });
     },
     // Hold-to-revive started (`reviving`) and finished (`revive`): { t: the knocked teammate }.
     reviving: (client: Client, msg: { t?: unknown }) => {
@@ -327,6 +351,7 @@ export class MatchRoom extends Room<{ state: MatchState }> {
       t.hp = HEALTH.reviveHp;
       t.downHp = 0;
       t.protectedUntil = this.state.clock + 1;
+      s.roundRevives++;
       this.broadcast("revive", { t: tid, b: client.sessionId });
     },
     // Fell off the island (or into the sea): out.
@@ -342,6 +367,71 @@ export class MatchRoom extends Room<{ state: MatchState }> {
       if (this.state.clock - p.deadAt < RESPAWN_MIN_S) return;
       this.spawn(client.sessionId, p, s, false);
     },
+
+    // --- Spectating (eliminated players watch the others until they respawn) -------------------------
+    // Who this eliminated player watches: { t: sessionId } (another player in the round), "" = nobody.
+    spectate: (client: Client, msg: { t?: unknown }) => {
+      const p = this.player(client);
+      if (!p || !p.team) return;
+      const tid = typeof msg?.t === "string" ? msg.t : "";
+      const t = tid && tid !== client.sessionId ? this.state.players.get(tid) : undefined;
+      p.watch = p.life === "dead" && t?.team && this.fighting() ? tid : "";
+    },
+    // A spectator likes the play of the player they watch: { t: sessionId }. Counted on the target
+    // (state `hearts`, this round) and broadcast as `heart` { f, t } for the floating hearts.
+    heart: (client: Client, msg: { t?: unknown }) => {
+      const p = this.player(client);
+      const s = this.sessions.get(client.sessionId);
+      const tid = typeof msg?.t === "string" ? msg.t : "";
+      const t = this.state.players.get(tid);
+      if (!p || !s || !t || !t.team || p.watch !== tid || p.life !== "dead") return;
+      const now = Date.now();
+      const given = s.heartsGiven.get(tid) ?? 0;
+      if (now - s.heartAt < HEART_GAP_MS || given >= HEARTS_PER_TARGET) return;
+      s.heartAt = now;
+      s.heartsGiven.set(tid, given + 1);
+      t.hearts = Math.min(65535, t.hearts + 1);
+      this.broadcast("heart", { f: client.sessionId, t: tid });
+    },
+    // A spectator's reaction to the player they watch: { t: sessionId, e: REACTIONS id }, relayed as
+    // `react` { f, t, e } (drawn over the target's head; the target sees who sent it).
+    react: (client: Client, msg: { t?: unknown; e?: unknown }) => {
+      const p = this.player(client);
+      const s = this.sessions.get(client.sessionId);
+      const tid = typeof msg?.t === "string" ? msg.t : "";
+      const e = typeof msg?.e === "string" ? msg.e : "";
+      const t = this.state.players.get(tid);
+      if (!p || !s || !t || !t.team || p.watch !== tid || p.life !== "dead" || !(REACTIONS as readonly string[]).includes(e)) return;
+      const now = Date.now();
+      if (now - s.reactAt < REACT_GAP_MS) return;
+      s.reactAt = now;
+      this.broadcast("react", { f: client.sessionId, t: tid, e });
+    },
+    // Another player's public profile (spectate "View profile"): { t: sessionId } -> `playerProfile`.
+    profileOf: (client: Client, msg: { t?: unknown }) => {
+      const s = this.sessions.get(client.sessionId);
+      const tid = typeof msg?.t === "string" ? msg.t : "";
+      const t = this.state.players.get(tid);
+      const ts = this.sessions.get(tid);
+      if (!s || !t || !ts) return;
+      const now = Date.now();
+      if (now - s.profileAt < PROFILE_GAP_MS) return;
+      s.profileAt = now;
+      const st = ts.profile.stats;
+      client.send("playerProfile", {
+        t: tid,
+        name: t.name,
+        level: t.level,
+        rp: t.rp,
+        signedIn: t.signedIn,
+        operative: t.operative,
+        primary: t.primary,
+        secondary: t.secondary,
+        stats: { matches: st.matches, wins: st.wins, eliminations: st.eliminations, deaths: st.deaths, best: st.best },
+        round: { kills: t.kills, deaths: t.deaths, assists: t.assists, knocks: t.knocks, damage: Math.round(t.damage), hearts: t.hearts },
+      });
+    },
+
     // Supplies: { c: crate index } or { d: airdrop id }. Ammo and items are the client's; armour is decided here.
     open: (client: Client, msg: { c?: unknown; d?: unknown }) => {
       const p = this.player(client);
@@ -426,6 +516,7 @@ export class MatchRoom extends Room<{ state: MatchState }> {
       streak: 0,
       lastElimAt: -99,
       roundGems: 0,
+      roundRevives: 0,
       zoneTick: 0,
       shotSeq: new Map(),
       shotAt: new Map(),
@@ -443,6 +534,10 @@ export class MatchRoom extends Room<{ state: MatchState }> {
       playedRound: -1,
       lastSeat: -1,
       lastInviteAt: 0,
+      heartAt: 0,
+      heartsGiven: new Map(),
+      reactAt: 0,
+      profileAt: 0,
     };
     this.sessions.set(client.sessionId, s);
     this.evictOthers(client.sessionId, s.identity);
@@ -544,10 +639,18 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     }
     const p = this.state.players.get(client.sessionId);
     if (p && (!RUNNING.has(this.state.phase) || !p.team)) this.applyLoadout(p, s);
+    if (p) this.applyPublic(p, s);
     this.sendProfile(client, s);
   }
 
+  // The profile's public face in the room state: level (career stats) and rank points.
+  private applyPublic(p: PlayerState, s: Session) {
+    p.level = levelOf(s.profile.stats);
+    p.rp = Math.min(0xffffffff, Math.max(0, Math.floor(s.profile.rp)));
+  }
+
   private sendProfile(client: Client, s: Session) {
+    refreshMissions(s.profile.missions); // a new day / week rolls new missions
     try {
       client.send("profile", { profile: s.profile, saved: this.saved(s), userId: s.identity.verified ? s.identity.userId : "" });
     } catch {
@@ -716,11 +819,13 @@ export class MatchRoom extends Room<{ state: MatchState }> {
   }
 
   private resetForRound(sessionId: string, p: PlayerState, s: Session) {
-    p.kills = p.deaths = p.assists = p.knocks = p.headshots = 0;
+    p.kills = p.deaths = p.assists = p.knocks = p.headshots = p.hearts = 0;
     p.damage = 0;
+    s.heartsGiven.clear();
     s.streak = 0;
     s.lastElimAt = -99;
     s.roundGems = 0;
+    s.roundRevives = 0;
     s.damagers.clear();
     s.playedRound = s.lastSeat = this.state.round;
     this.applyLoadout(p, s);
@@ -736,6 +841,7 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     p.emote = "";
     p.ultUntil = 0;
     p.killer = "";
+    p.watch = "";
     if (first) {
       this.setArmor(p, s, "vest", armorLv);
       this.setArmor(p, s, "helmet", armorLv);
@@ -777,12 +883,13 @@ export class MatchRoom extends Room<{ state: MatchState }> {
       r.gems -= r.gemsRound; // no round Gems for leaving (the kills' Gems stay)
       r.gemsRound = 0;
       r.won = false;
-      this.grant(sessionId, s, r);
+      this.grant(sessionId, s, r, false);
       void this.persist(sessionId);
     }
     p.inMatch = false;
     p.team = "";
     p.life = "dead";
+    p.watch = "";
     p.vote = -1;
     p.emote = "";
     s.playedRound = -1;
@@ -1201,7 +1308,8 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     };
   }
 
-  private grant(sessionId: string, s: Session, r: ReturnType<MatchRoom["rewardsFor"]>) {
+  // `finished`: the round ran to its results (false = the player left it; play / win missions skip it).
+  private grant(sessionId: string, s: Session, r: ReturnType<MatchRoom["rewardsFor"]>, finished: boolean) {
     const pr = s.profile;
     pr.coins += r.coins;
     pr.gems = Math.min(GEMS_MAX, pr.gems + r.gemsRound);
@@ -1212,9 +1320,24 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     pr.stats.deaths += r.deaths;
     pr.stats.damage += Math.round(r.damage);
     pr.stats.best = Math.max(pr.stats.best, r.eliminations);
+    // Missions count this round; rank rewards pay any rank reached for the first time.
+    refreshMissions(pr.missions);
+    const missions = countRound(pr.missions, {
+      play: finished ? 1 : 0,
+      win: finished && r.won ? 1 : 0,
+      elims: r.eliminations,
+      knocks: r.knocks,
+      damage: r.damage,
+      headshots: r.headshots,
+      assists: r.assists,
+      revives: s.roundRevives,
+    });
+    const rankUp = payRankUps(pr);
+    const pl = this.state.players.get(sessionId);
+    if (pl) this.applyPublic(pl, s);
     const client = this.clients.find((c) => c.sessionId === sessionId);
     if (client) {
-      client.send("rewards", r);
+      client.send("rewards", { ...r, missions, rankUp });
       this.sendProfile(client, s);
     }
     // Leaderboards and stats: verified Bloxity accounts only (docs: report only legion_ identities).
@@ -1233,7 +1356,7 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     for (const [sid, p] of round) {
       const s = this.sessions.get(sid);
       if (!s) continue;
-      this.grant(sid, s, this.rewardsFor(sid, p, mvpId));
+      this.grant(sid, s, this.rewardsFor(sid, p, mvpId), true);
       s.playedRound = -1;
       void this.persist(sid);
     }

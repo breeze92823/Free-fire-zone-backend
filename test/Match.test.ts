@@ -324,4 +324,58 @@ describe("match room", () => {
     await sleep(50);
     assert.strictEqual(room.state.players.get(b.sessionId)!.signedIn, false, "a refused token is a guest");
   });
+  it("spectating: the eliminated player watches someone, gives hearts and reactions, reads a profile", async () => {
+    const { room, clients } = await startRound(colyseus);
+    const [a, b] = clients;
+    const pa = room.state.players.get(a.sessionId)!;
+    const pb = room.state.players.get(b.sessionId)!;
+    assert.strictEqual(pa.level, 1, "a new account is level 1");
+    const hearts: any[] = [];
+    const reacts: any[] = [];
+    const profiles: any[] = [];
+    a.onMessage("heart", (m) => hearts.push(m));
+    a.onMessage("react", (m) => reacts.push(m));
+    b.onMessage("playerProfile", (m) => profiles.push(m));
+    // Alive players cannot spectate.
+    b.send("spectate", { t: a.sessionId });
+    await sleep(60);
+    assert.strictEqual(pb.watch, "");
+    a.send("pose", { x: 0, y: 0, z: 0 });
+    b.send("pose", { x: 0, y: 0, z: 5 });
+    await sleep(60);
+    for (let s = 1; s <= 8 && pb.life !== "dead"; s++) {
+      a.send("hit", { t: b.sessionId, w: "striker", s, n: 1, h: 1, d: 5 });
+      await sleep(110);
+    }
+    assert.strictEqual(pb.life, "dead");
+    assert.strictEqual(pb.killer, a.sessionId);
+    // A heart before watching is ignored; then watch the killer.
+    b.send("heart", { t: a.sessionId });
+    await sleep(60);
+    assert.strictEqual(pa.hearts, 0, "only the watched player gets hearts");
+    b.send("spectate", { t: a.sessionId });
+    await until(() => pb.watch === a.sessionId, 1000, "watching");
+    b.send("heart", { t: a.sessionId });
+    b.send("heart", { t: a.sessionId }); // too soon: dropped
+    await until(() => hearts.length === 1, 1000, "heart");
+    await sleep(60);
+    assert.strictEqual(pa.hearts, 1);
+    assert.deepStrictEqual(hearts[0], { f: b.sessionId, t: a.sessionId });
+    b.send("react", { t: a.sessionId, e: "nope" }); // unknown reaction
+    b.send("react", { t: a.sessionId, e: "fire" });
+    await until(() => reacts.length === 1, 1000, "react");
+    assert.deepStrictEqual(reacts[0], { f: b.sessionId, t: a.sessionId, e: "fire" });
+    b.send("profileOf", { t: a.sessionId });
+    await until(() => profiles.length === 1, 1000, "profile");
+    assert.strictEqual(profiles[0].t, a.sessionId);
+    assert.strictEqual(profiles[0].name, "P0");
+    assert.strictEqual(profiles[0].round.kills, 1);
+    assert.strictEqual(profiles[0].round.hearts, 1);
+    assert.strictEqual(profiles[0].level, 1);
+    // Respawning stops spectating.
+    await sleep(3600);
+    b.send("respawn");
+    await until(() => pb.life === "alive", 1000, "respawn");
+    assert.strictEqual(pb.watch, "");
+  });
 });

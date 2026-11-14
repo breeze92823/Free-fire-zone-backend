@@ -17,6 +17,8 @@ export const PlayerState = schema(
     party: t.string().default(""), // Bloxity party room key: party members share a team
     squad: t.string().default(""), // in-game team (lobby party) id, "" = solo; squad members queue and play together
     squadLead: t.boolean().default(false), // the squad's leader: only they press Play for the squad
+    level: t.uint16().default(1), // from career stats (rules.ts levelOf), for the spectate card
+    rp: t.uint32().default(0), // rank points (the rank badge)
 
     inMatch: t.boolean().default(false), // pressed Play (in the round or waiting for one)
     team: t.string().default(""), // "blue" | "orange" | "" (in the menus)
@@ -31,6 +33,8 @@ export const PlayerState = schema(
     protectedUntil: t.float32().default(0), // round clock
     deadAt: t.float32().default(0), // round clock of the last elimination
     killer: t.string().default(""), // sessionId of who eliminated this player last ("" = zone / self)
+    watch: t.string().default(""), // sessionId this eliminated player is spectating ("" = none)
+    hearts: t.uint16().default(0), // hearts spectators gave this player this round
 
     // Pose, from the player's own client ~20x/s.
     x: t.float32().default(0),

@@ -150,3 +150,14 @@ export function damageFalloff(w: WeaponRule, dist: number): number {
   if (dist <= start) return 1;
   return 1 - 0.4 * Math.min(1, (dist - start) / (w.range - start));
 }
+
+// Player level (shown on the spectate card and the public profile): from career stats, never bought.
+// xp = matches * matchXp + wins * winXp + eliminations * elimXp; level = 1 + floor(sqrt(xp / per)).
+export const LEVEL = { matchXp: 20, winXp: 20, elimXp: 10, per: 50, max: 999 };
+export function levelOf(stats: { matches: number; wins: number; eliminations: number }): number {
+  const xp = stats.matches * LEVEL.matchXp + stats.wins * LEVEL.winXp + stats.eliminations * LEVEL.elimXp;
+  return Math.min(LEVEL.max, 1 + Math.floor(Math.sqrt(Math.max(0, xp) / LEVEL.per)));
+}
+
+// Spectator reactions (`react`): ids only, the client draws them (config.js REACTIONS).
+export const REACTIONS = ["laugh", "fire", "clap", "wow", "gg"] as const;

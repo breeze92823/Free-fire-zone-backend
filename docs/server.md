@@ -87,6 +87,8 @@ Server limits and timings (rules shared with the client are in `rules.ts` / `cat
 | `FIRE_RATE_SLACK` | 0.6 | a new shot may arrive after 60% of the weapon interval |
 | `RESPAWN_MIN_S` | 3.5 | round-clock seconds after death before `respawn` is accepted |
 | `SHOT_POINTS_MAX` | 12 | tracer end points relayed per `shot` |
+| `HEART_GAP_MS`, `HEARTS_PER_TARGET` | 400, 20 | a spectator's hearts: one per 400 ms, at most 20 to one player per round |
+| `REACT_GAP_MS`, `PROFILE_GAP_MS` | 1200, 400 | a spectator's reactions; public profile requests |
 | `TIMING` | `{ spawnGraceMs: 4000, joinGraceMs: 5000 }` | wall-clock windows in which poses may jump; a mutable object so tests can shorten it |
 | `REPLACED_CODE` | 4100 | close code for a session replaced by a newer one |
 | `ID_PATTERN` | `/^[a-z0-9_:-]{1,40}$/` | not imported anywhere (unused) |
@@ -132,6 +134,7 @@ Extra rule fields: `melee` (a blow: melee range slack, never a headshot), `pierc
 - `ISLAND_RADIUS` 125; `ZONE`: `start` 150, `phases` `[{at 35, shrink 30, radius 105}, {at 95, shrink 30, radius 72}, {at 160, shrink 30, radius 46}]`, `damage` `[4, 7, 11]` HP per second outside.
 - `LOOT`: `crates` 200 (accepted crate indexes), `respawn` 40 s, `airdropAt` `[70, 150]`, `airdropFall` 9 s.
 - `REWARDS`: `perElimination` 12, `perKnock` 3, `perDamage` 1/25, `win` 70, `loss` 25, `mvp` 30, `rpWin` 40, `rpLoss` -12, `rpPerElim` 3, `leavePenaltyRp` -12.
+- `LEVEL` + `levelOf(stats)`: xp = matches x 20 + wins x 20 + eliminations x 10, level = 1 + floor(sqrt(xp / 50)), max 999 (state `level`). `REACTIONS`: the spectator reaction ids (`laugh`, `fire`, `clap`, `wow`, `gg`; client `config.js REACTIONS`).
 - `GEMS` (the game's own currency, not Bloxity Gems and not premium currency: earned only by playing, never sold; spent on weapons, grenades and passes): `perElimination` 12, `perKnock` 3, `headshot` +3 on a headshot elimination, `streak` +4 per elimination past the first in a streak, counted up to `streakCap` 5 (Double +4, Triple +8, ... +16); at the results `win` 40, `loss` 15, `mvp` 25. `GEMS_MAX` 1e9.
 
 ### `src/catalog.ts`
@@ -144,7 +147,7 @@ Prices, the profile shape and the shop logic (pure functions, no I/O).
 - `OPERATIVE_PRICES`: rook 0, nova 1200, jin 1500, shade 2000.
 - `STORE` (`StoreItem[]`): upgrades (`max` 2 each) `medkits` 900, `walls` 1000, `frags` 1100, `armor` 2400; emotes `emote_dance` 500, `emote_salute` 350, `emote_flex` 650, `emote_cheer` 450 (each has `emote`: the emote id it unlocks). An upgrade's price is per level.
 - `EMOTES` `["wave","dance","salute","flex","cheer"]`; `MODES` `["clash","squad"]` (ids only; not the same export as `rules.MODES`).
-- `Profile`: `coins`, `gems`, `rp`, `owned { weapons, skins, operatives, emotes }`, `loadout { primary, secondary, operative, emote, skin: Record<weapon, skin> }`, `upgrades: Record<id, level>`, `stats { matches, wins, eliminations, deaths, damage, best }`, `mode`.
+- `Profile`: `coins`, `gems`, `rp`, `owned { weapons, skins, operatives, emotes }`, `loadout { primary, secondary, operative, emote, skin: Record<weapon, skin> }`, `upgrades: Record<id, level>`, `stats { matches, wins, eliminations, deaths, damage, best }`, `mode`, `missions`, `rankReward`, `tutorial` (5.13).
 - `START_PROFILE`: 600 coins, 0 gems, 0 rp, owns striker/viper/knife/fists, skin standard, operative rook, emote wave, mode clash.
 - `COINS_MAX` 1e12, `GEMS_MAX` 1e9 (from `rules.ts`), `RP_MAX` 1e9 (applied when a stored document is normalized, not when rewards are granted).
 - `normalizeProfile(raw)`: builds a valid `Profile` from any stored document: numbers clamped and floored, unknown ids dropped, starter items always owned, equipped items must be owned and in the right slot, upgrade levels clamped to `max`, unknown `mode` falls back to `clash`. Anything it does not copy is lost on load.
@@ -186,6 +189,8 @@ Synced to every client by Colyseus patches every `PATCH_MS`. Server-only bookkee
 | `party` | string | Bloxity party room key; members share a team |
 | `squad` | string | in-game lobby team id (`s<n>`), `""` = solo; members queue and play together (5.4) |
 | `squadLead` | boolean | this player leads their squad: only they press Play for it |
+| `level` | uint16 | `levelOf(profile.stats)` (`applyPublic`: after the profile loads and after each grant) |
+| `rp` | uint32 | the profile's rank points (rank badge) |
 | `inMatch` | boolean | pressed Play (in a round or waiting for one) |
 | `team` | string | `"blue"`, `"orange"` or `""` |
 | `vote` | int8 | map index voted this round, -1 = none |
@@ -197,6 +202,8 @@ Synced to every client by Colyseus patches every `PATCH_MS`. Server-only bookkee
 | `protectedUntil` | float32 | round clock until which damage (not zone) is ignored |
 | `deadAt` | float32 | round clock of the last elimination |
 | `killer` | string | sessionId of the last killer, `""` = zone/self |
+| `watch` | string | sessionId this eliminated player spectates (`spectate`), `""` = none; cleared by `spawn` and `leaveMatch` |
+| `hearts` | uint16 | hearts spectators gave this player this round (`heart`); reset in `resetForRound` |
 | `x`, `y`, `z` | float32 | pose position (m) |
 | `yaw`, `pitch` | float32 | radians; pitch clamped to +-1.6 |
 | `speed` | float32 | horizontal speed reported by the client, 0..60 |
@@ -268,6 +275,8 @@ Helpers used everywhere: `player(client)`, `fighting()` (phase is `playing` or `
 | `graceUntil` | wall ms | until then poses may jump |
 | `emoteAt` | wall ms | when the emote started (auto-clear after 6 s) |
 | `playedRound` | | round index the player fought in, -1 otherwise |
+| `heartAt`, `reactAt`, `profileAt` | wall ms | spectator rate limits (`heart`, `react`, `profileOf`) |
+| `heartsGiven` | | target sessionId -> hearts given this round (cap `HEARTS_PER_TARGET`); cleared in `resetForRound` |
 
 ### 5.2 Lifecycle
 
@@ -364,7 +373,8 @@ Not checked: line of sight, aim direction, ammo, reload, and that `t` was hit by
 - `reviving` then `revive`: `reviving { t }` records the target and time without checks. `revive { t }` needs: reviver alive, target knocked, same team, `fighting()`, a matching `reviving` at least `HEALTH.reviveTime * 800` ms (2400) old, and distance `<= HEALTH.reviveRange + RANGE_SLACK * 0.25` (6.5 m). Result: target `alive`, `hp = HEALTH.reviveHp`, 1 s of protection, broadcast `revive`.
 - `fell`: in `playing` and not dead -> `eliminate(self, null, { zone: true })`.
 - `respawn`: dead, has a team, phase `playing`, `clock - deadAt >= RESPAWN_MIN_S` -> `spawn(first = false)`.
-- `spawn(sessionId, p, s, first)`: alive, full HP, emote/ult/killer cleared. Armour level from the `armor` upgrade: `1 + level` (so 2 or 3), else 0. First spawn: vest and helmet set to that level, no protection. Respawn: each piece becomes `max(current level, 1, upgrade level)` with full durability, and `protectedUntil = clock + HEALTH.spawnProtection`. Resets damage bookkeeping, sets `graceUntil = now + TIMING.spawnGraceMs`, re-applies the loadout, broadcasts `spawn { id, first }`.
+- Spectating (eliminated players watch the others until they press Revive): `spectate { t }` sets `watch` (only while dead, with a team, `fighting()`, `t` another player with a team; anything else clears it). `heart { t }`: the sender must be dead and watching `t`; `HEART_GAP_MS`, at most `HEARTS_PER_TARGET` per target per round (`heartsGiven`); `t.hearts++`, broadcast `heart { f, t }`. `react { t, e }`: same watching rule, `e` in `REACTIONS`, `REACT_GAP_MS`; broadcast `react { f, t, e }`. `profileOf { t }`: `PROFILE_GAP_MS`; answers `playerProfile` with `t`'s name, `level`, `rp`, loadout, career `stats` (from the session profile, guests included) and this round's numbers. Hearts and reactions are social only: they grant nothing.
+- `spawn(sessionId, p, s, first)`: alive, full HP, emote/ult/killer/`watch` cleared. Armour level from the `armor` upgrade: `1 + level` (so 2 or 3), else 0. First spawn: vest and helmet set to that level, no protection. Respawn: each piece becomes `max(current level, 1, upgrade level)` with full durability, and `protectedUntil = clock + HEALTH.spawnProtection`. Resets damage bookkeeping, sets `graceUntil = now + TIMING.spawnGraceMs`, re-applies the loadout, broadcasts `spawn { id, first }`.
 - `open`: alive, `fighting()`, 250 ms rate limit.
   - `{ c }`: index `0 <= c < LOOT.crates`. Already open -> `openFail { c }` to the sender. Otherwise `crates[c] = clock + LOOT.respawn`, a 45% chance of +1 armour level (the vest if `vest <= helmet` and below 3, else the helmet if below 3), broadcast `opened { c, by }`.
   - `{ d }`: unknown, already opened or still falling -> `openFail { d }`. Otherwise `opened = true`, vest and helmet set to 3, broadcast `opened { d, by }`.
@@ -378,7 +388,7 @@ Not checked: line of sight, aim direction, ammo, reload, and that `t` was hit by
 - `vote { map, mode }` is accepted only in phase `vote` from a player with `inMatch`.
 - `rewardsFor(sessionId, p, mvpId)`: `won = p.team === state.winner`; `coins = round(kills * 12 + knocks * 3 + damage / 25 + (won ? 70 : 25) + (mvp ? 30 : 0))`; `rp = (won ? 40 : -12) + kills * 3`; `gemsRound` (the round's Gems, granted by `grant`), `gems = roundGems + gemsRound` (everything the round earned, for the results screen); plus the round's stats and final score.
 - `finishRound()`: participants are players in the round with `playedRound === round`. MVP is the participant with the most kills (then damage) if they have at least one kill. Each gets `grant`, then `persist`. Then phase `results` and `flushReports()`.
-- `grant(sessionId, s, r)`: adds coins, `rp = max(0, rp + r.rp)`, `stats.matches++`, `wins`, `eliminations`, `deaths`, `damage`, `best`; sends `rewards` and `profile`; for verified identities queues leaderboard scores (`eliminations`, `weekly_elims`, `best_match`, `wins`) and stats.
+- `grant(sessionId, s, r, finished)`: adds coins, `rp = max(0, rp + r.rp)`, `stats.matches++`, `wins`, `eliminations`, `deaths`, `damage`, `best`; counts the round into the missions (`countRound`; `play` / `win` only when `finished`, i.e. not when leaving) and pays new ranks (`payRankUps`); sends `rewards` (with `missions` and `rankUp`) and `profile`; for verified identities queues leaderboard scores (`eliminations`, `weekly_elims`, `best_match`, `wins`) and stats.
 - Leaving a running round (`leaveMatch`): `rewardsFor` with no MVP, then `coins = max(0, round((coins - REWARDS.loss) * 0.5))`, `rp = min(rp, REWARDS.leavePenaltyRp)` (always -12 with the current numbers), `won = false`; granted and persisted at once. The match still counts in `stats.matches`.
 
 ### 5.11 Shop and profile persistence
@@ -389,7 +399,18 @@ Not checked: line of sight, aim direction, ammo, reload, and that `t` was hit by
 - `getProfile`: re-sends `profile` if loaded.
 - Local testing: `DEV_GEMS=<n>` (non-production only) starts a brand-new `dev-...` account with that many Gems, so the Weapons Store can be tried without playing rounds.
 - `persist(sessionId)` writes only when `loaded` and `saved(s)`. It is called after a successful `buy`/`equip`, before an identity switch (`auth`), after rewards and penalties, and on the final leave.
-- `sendProfile` payload: `{ profile, saved, userId }` (`userId` is `""` unless verified).
+- `sendProfile` payload: `{ profile, saved, userId }` (`userId` is `""` unless verified). It first calls `refreshMissions`, so a new UTC day / week rolls new missions.
+
+### 5.13 Missions, rank rewards, first-round tips (`src/progress.ts`)
+
+- `MISSIONS` (`perDay` 3, `perWeek` 3, `daily` 8 and `weekly` 6 definitions `{ id, stat, goal, coins, gems }`) and `RANKS` (`name`, `rp`, one-time `coins` / `gems`) mirror the client's `config.js MISSIONS` / `RANKS`.
+- `profile.missions = { day, week, daily, weekly }` (slots `{ id, n, claimed }`). `refreshMissions(m, now)` rolls a random set when the UTC date (`dayKey`) or the Monday of the week (`weekKey`) changed; unclaimed rewards of the old set are lost. Called by `sendProfile`, `grant` and `claim`.
+- `countRound(m, stats)` adds a round (`play`, `win`, `elims`, `knocks`, `damage`, `headshots` (headshot hits), `assists`, `revives` from `Session.roundRevives`) to every unclaimed slot, capped at the goal, and returns the ids it finished.
+- `claim { m, i }` -> `claimMission`: errors `loading`, `unknown`, `claimed`, `unfinished`; otherwise pays coins and Gems (capped at `GEMS_MAX`), answers `claimed`, sends `profile`, persists.
+- `payRankUps(profile)`: pays every rank above `profile.rankReward` that `rp` reaches, once. `normalizeProfile` sets a missing `rankReward` to the current rank (no back pay) and a missing `tutorial` to `stats.matches > 0`.
+- `tutorialDone`: sets `profile.tutorial` and persists.
+- Missions count whatever a round grants, so the round-reward weaknesses in section 12 (a forfeit win, `play` during `ending`) also advance `win` / `play` missions.
+- Tests: `test/Progress.test.ts` (rollover, counting, claim, forged data, rank pay-out, a round that finishes missions and a rank, a claim, `tutorialDone`).
 
 ### 5.12 Single-session enforcement (`evictOthers`, close code 4100)
 
@@ -445,6 +466,8 @@ All best-effort; failures are logged or swallowed, never thrown into the room.
 | shop: skins with coins, weapons with Gems... | `profile`, a skin bought with coins, a weapon refused with `gems` (coins never buy it), the skin `equip` reflected in state, save in the fake collection |
 | Gem shop: weapons, grenades and the pass cost Gems... | a weapon bought with Gems, the pass and a grenade refused when short, coins untouched, the pass unlocking its set, an unowned grenade refused by `equip` |
 | a medic weapon heals a teammate... | the Mender stings an enemy, heals a teammate, and a normal gun still does no friendly damage |
+| spectating: the eliminated player watches someone... | `spectate` refused while alive; after the elimination: a heart before watching is ignored, `spectate` sets `watch`, a second heart within 400 ms is dropped, `heart` / `react` broadcasts, an unknown reaction is ignored, `playerProfile` answers, and a respawn clears `watch` |
+| `Progress.test.ts` | missions and rank rewards: unit tests of `progress.ts`, and a round that finishes missions and a rank, then a claim and `tutorialDone` |
 | verifies the token... | faked verifier, spoofed name/id ignored, verified `outfitKey`, `avatar` updates and validation, guest carry-over, refused token = guest |
 
 Adding a test: create `test/<name>.test.ts` (matched by the glob), get the server with `await testServer()`, call `__setPlayersForTest(null)`, `__setVerifierForTest(null)` and `await colyseus.cleanup()` in `beforeEach`, use `colyseus.createRoom("match", {})` and `colyseus.connectTo(room, options)`. Poll with `until` instead of fixed sleeps where possible. Mutable rule objects (`PHASES`, `TIMING`, and the objects in `rules.ts`) can be changed with `Object.assign`; such changes are process-wide and stay for later test files. Plain constants (`RECONNECT_SECONDS`, `ULT_MIN_GAP_S`, `RESPAWN_MIN_S`, `FIRE_RATE_SLACK`) cannot be shortened; fire-rate and revive checks use real time. `room.state` can be edited directly (the tests set `scoreToWin = 1`). The `@colyseus/sdk: onMessage() not registered` lines in the test output are harmless (test clients do not register every server message).
@@ -499,7 +522,7 @@ Adding a test: create `test/<name>.test.ts` (matched by the glob), get the serve
 Items marked (reproduced) were confirmed by running a throwaway test against the current code outside the repo; the rest come from reading the source.
 
 **Repository**
-- `build/` is stale output from a different, older project (`WorldRoom.js`, `WorldState.js`, `spin.js`, `daily.js`, `sanitize.js`; a room named `world`, `ROOM_MAX_CLIENTS = 50`, boats/pets/spin-wheel constants; files dated before the current `src/`). It does not correspond to `src/`. It is git-ignored and docker-ignored, and `npm run build` deletes it first, so it is harmless but misleading: do not read it as documentation.
+- `build/` was rebuilt from this `src/` on 2026-11-14 (it used to hold another project's output). It is git-ignored and recreated by `npm run build`.
 - `deploy.yml` still describes `roomSize` as "WorldRoom's maxClients". Comments in `constants.ts` ("client net.js NET_REPLACED") and `MatchState.ts` ("client net.js FLAGS") name client symbols that are actually `REPLACED_CODE` in `net.js` and `FLAG` in `online.js`. The `catalog.ts` header mentions `RANKS`, which exists only on the client.
 - Unused: `ID_PATTERN`, the server-side `FLAG` export, `OPERATIVES[].charge`, `loadProfile().found`, the boolean returned by `saveProfile`, `PlayerDoc.version` beyond insert.
 - `CLAUDE.md` lists the events sent without `openFail` and `serverError`, and says "one live session per account"; see the next block for what the code does.
@@ -527,5 +550,5 @@ Items marked (reproduced) were confirmed by running a throwaway test against the
 - Leaving during `ending` on the winning side computes the penalty from a total that included the win bonus.
 - Armour: a respawn keeps the armour level and restores full durability; the Rook cut also reduces zone damage.
 - `squad` rounds (180 s) end before the last zone phase finishes shrinking (160 + 30 s).
-- (reproduced) `ult` is broadcast to the sender as well; the client does not filter its own id (see `protocol.md` section 9).
+- Fixed 2026-11-14: `ult` is no longer broadcast to its sender.
 - `equip` before the profile has loaded is silently ignored, while `buy` answers `error: "loading"`.

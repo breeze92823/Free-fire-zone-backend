@@ -82,11 +82,17 @@ Every handler ignores the message when the sender has no player/session. "Fighti
 | `boom` | `{ x, y, z, t: [sid, ...] }` (blast point, targets in the blast with line of sight) | `combat.js explode` (the local player's frag fuse ran out) | `onBoom`: needs a pending throw not older than its fuse + 3 s, within 60 m of the thrower; damage, radius and fuse from `GRENADES[kind]`, by server distance | `boom` to all but the sender; `dmg` etc. to all |
 | `wall` | `{ x, y, z, yaw }` | `items.js deployWall` | Alive, fighting, 300 ms rate limit, within 8 m of the sender | `wall` to all but the sender |
 | `heal` | none | `items.js updateActorItems` when the medkit timer (2.2 s) completes | Alive, fighting, 1.76 s rate limit; +80 HP up to 200 | State (`hp`) |
-| `ult` | none | `items.js useUltimate` (Q) | Alive, fighting, 18 s gap; Jin heals, others set `ultUntil` | `ult` to all, sender included |
+| `ult` | none | `items.js useUltimate` (Q) | Alive, fighting, 18 s gap; Jin heals, others set `ultUntil` | `ult` to the others (not the sender) |
+| `claim` | `{ m: "daily" \| "weekly", i }` | `save.js claimMission` (lobby Missions window) | `progress.ts claimMission`: the slot exists, is finished and not claimed; pays its coins and Gems; saves | `claimed` to the sender, then `profile` |
+| `tutorialDone` | none | `save.js finishTutorial` (last tip or Skip) | Sets `profile.tutorial`; saves. Ignored before the profile loads | none |
 | `reviving` | `{ t }` knocked teammate sid | `controller.js updateController` when a revive hold starts | Records the hold start (no checks) | none |
 | `revive` | `{ t }` | `controller.js updateController` when the hold reaches `HEALTH.reviveTime` (3 s) | Hold at least 2.4 s old, same team, target knocked, within 6.5 m | `revive` to all |
 | `fell` | none | `main.js` `body.onFellOut` (below `PHYSICS.killY`, at most once a second) | In `playing`, not dead: eliminated as a zone death | `elim` to all |
-| `respawn` | none | `main.js requestRespawn` (Respawn button via the portal death screen, or the `NET.respawnFallback` 5 s timer) | Dead, has a team, `playing`, at least 3.5 s of round clock since death | `spawn { id, first: false }` to all |
+| `respawn` | none | `main.js requestRespawn` (the spectate panel's Revive button or G: after the portal death screen's countdown, or `NET.respawnFallback` 5 s without the portal; without the portal also automatically after `NET.autoRespawn` 20 s) | Dead, has a team, `playing`, at least 3.5 s of round clock since death | `spawn { id, first: false }` to all |
+| `spectate` | `{ t }` sid of the player watched, `""` = nobody | `main.js spectateActor` (elimination: the killer first; the arrows / Left-Right keys; the watched player went down; respawn sends `""`) | Sets `watch = t` when the sender is dead, has a team, it is `fighting()` and `t` is another player with a team; else `watch = ""` | none (state `watch`) |
+| `heart` | `{ t }` | `main.js giveHeart` (the spectate panel's hearts card, H) at most every `SPECTATE.heartGap` 0.4 s | Sender dead and watching `t`, `HEART_GAP_MS` 400 ms, at most `HEARTS_PER_TARGET` 20 per target per round; `t.hearts++` | `heart { f, t }` to all |
+| `react` | `{ t, e }`, `e` in `REACTIONS` (`laugh`, `fire`, `clap`, `wow`, `gg`) | `main.js sendReaction` (the spectate panel's reaction picker) | Sender dead and watching `t`, known `e`, `REACT_GAP_MS` 1.2 s | `react { f, t, e }` to all |
+| `profileOf` | `{ t }` | `main.js` `onProfile` (spectate "View profile") | Any two players in the room, `PROFILE_GAP_MS` 400 ms | `playerProfile` to the sender |
 | `open` | `{ c }` crate index, or `{ d }` airdrop id | `loot.js openCrate` (E on a crate or landed drop) | Alive, fighting, 250 ms rate limit; marks it open; rolls or grants armour | `opened` to all, or `openFail` to the sender |
 
 Notes:
@@ -102,7 +108,7 @@ All listed types are registered in `net.js MESSAGES` and forwarded to `onNet(typ
 |---|---|---|---|---|
 | `profile` | `{ profile, saved, userId }` (`Profile`; `saved`: stored for this identity; `userId`: verified id or `""`) | After the profile loads, on `getProfile`, after a successful `buy`/`equip`, with every reward, after a reconnect | one | `save.js`: replaces the mirrored `profile`, sets `account.loaded` / `account.saved`, notifies `onProfile` listeners. `userId` is not read |
 | `shop` | `{ ok, kind, id, error }`, `error`: `null`, `loading`, `unknown`, `owned`, `coins`, `locked`, `slot` | Every `buy`; a refused `equip` | one | `save.js`: on `ok: false` sends `getProfile` to resync |
-| `rewards` | `{ won, mvp, coins, gems, gemsRound, rp, eliminations, knocks, assists, damage, deaths, headshots, score: { blue, orange } }` (`gemsRound`: the round's Gems, granted now; `gems`: everything the round earned, kills included) | End of the round (`finishRound`), or on leaving a running round | one | `main.js`: stored; `showRoundResults` -> `results.js showResults` |
+| `rewards` | `{ won, mvp, coins, gems, gemsRound, rp, eliminations, knocks, assists, damage, deaths, headshots, score: { blue, orange }, missions, rankUp }` (`missions`: ids this round finished; `rankUp`: `[{ rank, name, coins, gems }]` paid now; both already in the profile that follows) (`gemsRound`: the round's Gems, granted now; `gems`: everything the round earned, kills included) | End of the round (`finishRound`), or on leaving a running round | one | `main.js`: stored; `showRoundResults` -> `results.js showResults` |
 | `reward` | `{ k, t, gems, coins, rp, h, s, b, total }`: `elim` / `knock`, target sid, Gems granted now, coins and rank points this kill adds to the round's `rewards`, headshot, streak, streak bonus Gems, the new Gems balance | The player knocks or eliminates an enemy during `playing` | one (the shooter) | `save.js`: `profile.gems = total`; `online.js`: bus `reward { kind, target, gems, coins, rp, head, streak, bonus }` -> HUD kill popup and multi-kill banner |
 | `serverError` | `{ reason: 'load' }` | The profile could not be read from the database | one | no listener |
 | `round` | `{ round }` | `startRound` | all | no listener (the client follows `state.phase`) |
@@ -116,12 +122,16 @@ All listed types are registered in `net.js MESSAGES` and forwarded to `onNet(typ
 | `healed` | `{ t, a, n }`: healed sid, healer sid, HP | A medic weapon healed a teammate | all | bus `heal { target, by, amount }` (green numbers for the healer) |
 | `boom` | `{ id, x, y, z }` | A frag exploded | all but the sender | `combat.js explodeVisual` (bus `explosion`); `id` is not read |
 | `wall` | `{ id, x, y, z, yaw }` | Relay of `wall` | all but the sender | `items.js remoteWall`: a real collider locally (bus `wall`) |
-| `ult` | `{ id, op }` | An ability was accepted | all | `items.js ultVisual(actor, op)` (bus `ultimate`) |
+| `ult` | `{ id, op }` | An ability was accepted | all but the sender | `items.js ultVisual(actor, op)` (the client also skips its own id) |
+| `claimed` | `{ m, i, id, coins, gems }` or `{ m, i, error }` (`error`: `loading`, `unknown`, `claimed`, `unfinished`) | Every `claim` | one | `save.js onClaimed` -> `lobby.js` (sound + toast) |
 | `opened` | `{ c, by }` or `{ d, by }` | A crate or airdrop was opened | all | `loot.js markOpened(c, d)` unless `by` is the local player |
 | `openFail` | `{ c }` or `{ d }` | `open` refused (already open, unknown drop, drop still falling) | sender | no listener |
 | `matchEnd` | `{ winner }` (`blue` / `orange`) | The round is decided (`end`) | all | bus `matchEnd { winner }` (slow motion, banner) |
 | `invite` | `{ id, from, name, pfp, size, ttl }` (`size` = members of the inviter's squad, 1 = solo; `ttl` s) | Another player invited this one | one | `party.js`: an Accept / Decline card with a countdown bar (up to 3 shown) |
 | `inviteEnd` | `{ id }` | The invite expired, or the inviter queued / left | one | `party.js`: removes the card |
+| `heart` | `{ f, t }`: the spectator's and the watched player's sids | A spectator's `heart` was accepted | all | bus `heart { from, target }`: hearts float up on the spectate panel of whoever watches `t`; `t` gets a toast (at most one per 2 s) |
+| `react` | `{ f, t, e }` | A spectator's `react` was accepted | all | bus `react { from, target, reaction }`: the reaction glyph (`REACTIONS` in `config.js`) and the sender's name float over `t`'s head; `t` gets a toast |
+| `playerProfile` | `{ t, name, level, rp, signedIn, operative, primary, secondary, stats: { matches, wins, eliminations, deaths, best }, round: { kills, deaths, assists, knocks, damage, hearts } }` | Answer to `profileOf` | one | bus `playerProfile` (+ `actor`): fills the spectate panel's profile window |
 | `squadNote` | `{ kind, name? }`; `kind`: `sent`, `busy`, `youBusy`, `inTeam`, `sameTeam`, `full`, `dup`, `declined`, `expired`, `joined`, `welcome`, `left`, `kicked`, `youKicked`, `disbanded`, `leader`, `notLeader`, `gone`, `youInTeam`, `teamFull` | Every squad event that needs a message | one | `party.js`: a toast (`NOTES` maps a kind to its text, e.g. `busy` = "<name> is currently in a game and cannot view invitations at this time.") and clears that player's "Sent" mark |
 
 ## 5. Schema state the client reads
@@ -149,6 +159,8 @@ Field definitions are in `server.md` section 4. `net.state` is read directly eac
 | player `primary`, `secondary`, `skinPrimary`, `skinSecondary`, `operative` | `match.js createMatch` (local loadout for the round), `makeRemote` / `applyRemote`, lobby roster |
 | player `emote`, `ultUntil` | `applyRemote` (remote players; `shade` -> cloak, others -> ability aura) |
 | player `kills`, `deaths`, `assists`, `knocks`, `headshots`, `damage` | `online.js copyStats` (scoreboard, MVP, results) |
+| player `level`, `rp`, `hearts` | `online.js copyPublic` -> actor `level`, `rp`, `hearts` (the spectate card: level, rank badge, hearts count; the profile window) |
+| player `watch` | `online.js applyState`: counts spectators per player -> actor `watchers` (the spectate panel's eye counter) |
 
 Synced but not read by the client: `signedIn`, `party` (the Bloxity party key; `squad` is the in-game lobby team), `voteMode`, `deadAt`, `killer`, `speed`.
 
@@ -237,7 +249,10 @@ Related values that differ on purpose (the server is looser, or only one side ha
 |---|---|---|
 | Revive reach | 2.2 m literal in `controller.js` | `HEALTH.reviveRange` 3.5 m + 3 m slack |
 | Revive hold | `HEALTH.reviveTime` 3 s | 2.4 s minimum |
-| Respawn wait | `NET.respawnFallback` 5 s, or the portal's death screen | `RESPAWN_MIN_S` 3.5 s |
+| Respawn wait | `NET.respawnFallback` 5 s (Revive enabled; automatic at `NET.autoRespawn` 20 s), or the portal's death screen | `RESPAWN_MIN_S` 3.5 s |
+| Spectator rate limits | `SPECTATE.heartGap` 0.4 s, `SPECTATE.reactGap` 1.2 s | `HEART_GAP_MS` 400, `REACT_GAP_MS` 1200, `HEARTS_PER_TARGET` 20 |
+| Reactions | `REACTIONS` ids + glyphs | `REACTIONS` ids |
+| Level | reads `level` | `LEVEL`, `levelOf` (career stats) |
 | Fire interval | interval, x0.77 during Nova's ability | interval x `FIRE_RATE_SLACK` 0.6 |
 | Melee reach | range + 0.5 m horizontal | range + 2.5 m |
 | Movement speed | at most 8.6 m/s sprint (x1.3 Nova), 20 m/s dash for 0.18 s | `MAX_SPEED` 32 m/s + `MOVE_SLACK` 6 m |
@@ -253,12 +268,11 @@ No mirrored value currently disagrees.
 
 - Sent by the server, not handled by the client: `round`, `serverError`, `openFail` (registered in `MESSAGES`, no `onNet` listener). A failed profile load or a refused `open` therefore shows nothing; the client has already taken the crate's ammo and items locally.
 - Payload fields nobody reads: `profile.userId`, `boom.id`, a successful `shop`.
-- `ult` reaches the sender too, and `online.js` resolves its own `sid` to the local actor (`byNet` finds `G.player` because `createMatch` sets its `netId`), so `ultVisual` runs a second time for the local player after the local call in `useUltimate`. The other relays exclude the sender.
 - A refused `ult` (under 18 s since the last) is silent: the client has already spent its charge and drawn the effect. This can happen legitimately after an airdrop refills the charge.
 - Accepted by the server, never sent by the client: `vote.mode` (the mode preference travels in `play`), `FLAG.sprint`.
 - Armour durability is server-only. The client HUD reads `vestDur` / `helmetDur` on the local actor, which nothing updates, so its durability bars cannot reflect the server.
 - `emote` ids from the portal are sent as `portal:<id>`; the server accepts only `[a-z0-9]{1,40}` after the prefix and drops anything else without a reply.
 - The client's `shot` handler has a knife/fists branch, but the client never sends `shot` for melee; remote swings are shown through `FLAG.swing`.
-- Client leaderboard code (`bloxity.js submitMatchScores`) is never called; scores and stats are reported only by the server (`reporters.ts`). The client still declares the boards (`leaderboard.define`).
+- The client declares the leaderboards (`leaderboard.define`) and submits nothing; scores and stats are reported only by the server (`reporters.ts`).
 - Private rooms: `net.js` marks the private attempt as tried before `create` resolves, so if that one attempt fails the retry joins a public room through matchmaking.
 - Several client constants mirror server values without being read (`REWARDS`, `MATCH.voteTime`, `MATCH.countdown`, `MATCH.endSlowmo`, `MATCH.streakWindow`, `NET.roomSize`): changing them has no effect on behaviour, but they should still be kept in step as documentation.

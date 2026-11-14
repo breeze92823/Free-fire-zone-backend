@@ -1,7 +1,9 @@
 import { GEMS_MAX } from "./rules.js";
+import { RANKS, emptyMissions, normalizeMissions, rankOf, type Missions } from "./progress.js";
 
 // Shop prices and the starting profile: a copy of the client's src/config.js WEAPONS / SKINS /
-// OPERATIVES / STORE / GRENADES / PASSES / START_PROFILE / RANKS. Keep in step with it by hand.
+// OPERATIVES / STORE / GRENADES / PASSES / START_PROFILE (RANKS and MISSIONS: progress.ts). Keep in
+// step with it by hand.
 // Skins, operatives and the Store are priced in coins; weapons, grenades and passes in the game's
 // own Gems (`gems`, earned by eliminations and rounds, rules.ts GEMS). Both are earned by playing
 // only: nothing is ever sold for premium currency (Bloxity Gems) or real money.
@@ -73,6 +75,9 @@ export interface Profile {
   upgrades: Record<string, number>;
   stats: { matches: number; wins: number; eliminations: number; deaths: number; damage: number; best: number };
   mode: string;
+  missions: Missions; // daily / weekly missions (progress.ts)
+  rankReward: number; // highest RANKS index whose one-time reward was paid
+  tutorial: boolean; // the first-round tips were finished (or skipped)
 }
 
 export const START_PROFILE: Profile = {
@@ -84,6 +89,9 @@ export const START_PROFILE: Profile = {
   upgrades: {},
   stats: { matches: 0, wins: 0, eliminations: 0, deaths: 0, damage: 0, best: 0 },
   mode: "clash",
+  missions: emptyMissions(),
+  rankReward: 0,
+  tutorial: false,
 };
 
 export const COINS_MAX = 1e12;
@@ -129,6 +137,11 @@ export function normalizeProfile(raw: any): Profile {
   }
   for (const k of Object.keys(p.stats) as (keyof Profile["stats"])[]) p.stats[k] = num(raw.stats?.[k], 1e12);
   if (MODES.includes(raw.mode)) p.mode = raw.mode;
+  p.missions = normalizeMissions(raw.missions);
+  // A save from before rank rewards existed counts its current rank as paid (no back pay).
+  p.rankReward = typeof raw.rankReward === "number" ? Math.max(0, Math.min(RANKS.length - 1, Math.floor(raw.rankReward))) : rankOf(p.rp);
+  // Players who already finished a round before the tips existed do not get them.
+  p.tutorial = raw.tutorial === true || (raw.tutorial === undefined && p.stats.matches > 0);
   return p;
 }
 
