@@ -14,8 +14,10 @@ import { testServer } from "./server.js";
 Object.assign(PHASES, { vote: 0.1, intro: 0.05, countdown: 0.05, ending: 0.05, results: 0.2 });
 Object.assign(TIMING, { spawnGraceMs: 0, joinGraceMs: 0 });
 
-async function startRound(colyseus: ColyseusTestServer<typeof appConfig>, n = 2, opts: any[] = []) {
+async function startRound(colyseus: ColyseusTestServer<typeof appConfig>, n = 2, opts: any[] = [], maxClients = 0) {
   const room = await colyseus.createRoom<MatchState>("match", {});
+  // The queue is a fallback (a room is as big as a round); a test of it widens this room.
+  if (maxClients) room.maxClients = maxClients;
   const clients = [];
   for (let i = 0; i < n; i++) clients.push(await colyseus.connectTo(room, { name: `P${i}`, ...(opts[i] ?? {}) }));
   for (const c of clients) c.send("play", { mode: "squad" });
@@ -51,7 +53,7 @@ describe("match room", () => {
   });
 
   it("seats 3 v 3: the others who pressed Play wait, and sit first next round", async () => {
-    const { room, clients } = await startRound(colyseus, 8);
+    const { room, clients } = await startRound(colyseus, 8, [], 8);
     const teams = (id: string) => room.state.players.get(id)!.team;
     const seated = () => clients.filter((c) => teams(c.sessionId));
     assert.strictEqual(seated().length, 6, "a round seats 6");
@@ -64,6 +66,12 @@ describe("match room", () => {
     await until(() => room.state.phase === "results", 4000, "results");
     await until(() => room.state.phase === "playing" && room.state.round === 2, 4000, "round 2");
     for (const id of waiting) assert.ok(teams(id), "players who sat out are seated first");
+  });
+
+  it("a room is exactly a round's seats, so nobody queues: the 7th player is sent elsewhere", async () => {
+    const room = await colyseus.createRoom<MatchState>("match", {});
+    for (let i = 0; i < 6; i++) await colyseus.connectTo(room, { name: `P${i}` });
+    await assert.rejects(() => colyseus.connectTo(room, { name: "P6" }), /locked|full/i);
   });
 
   it("checks hits: rate, team, range; armour and damage are the server's", async () => {

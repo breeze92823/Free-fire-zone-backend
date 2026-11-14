@@ -41,7 +41,8 @@ export function installRoomReporter(): void {
         maxClients: l.maxClients ?? 0,
         locked: !!l.locked,
         private: !!l.private,
-        started: !!l.metadata?.started,
+        // Always false: the Open Rooms list shows `started` rooms as "Locked", and ours stay joinable.
+        started: false,
         metadata: l.metadata ?? {},
       }));
       const players = rooms.reduce((n, r) => n + r.clients, 0);

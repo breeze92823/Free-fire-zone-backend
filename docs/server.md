@@ -6,7 +6,7 @@ Everything here was written from the source in `src/`, `test/`, the build/deploy
 
 ## 1. Model in one page
 
-- One room type, `match` (`MatchRoom`). A room holds up to `ROOM_MAX_CLIENTS` (18) connections (the lobby), but a round seats only two teams of `TEAM_MAX` (3) = 6 players. Players who pressed Play beyond that wait in the queue (`inMatch`, no team) and are seated first next round (`Session.lastSeat`). Real players only.
+- One room type, `match` (`MatchRoom`). A room holds up to `ROOM_MAX_CLIENTS` (6) connections (the lobby) = a round's seats, two teams of `TEAM_MAX` (3), so the matchmaker opens another room instead of queueing players. The queue still exists as a fallback (e.g. an odd squad split that fits neither side): players who pressed Play without a seat wait (`inMatch`, no team) and are seated first next round (`Session.lastSeat`). Real players only.
 - Everyone who joins is "in the menus" (`inMatch = false`, `life = "dead"`, no team). `play` sets `inMatch`. A round needs `MIN_PLAYERS` (2) players with `inMatch`.
 - Rounds run in the same room forever: `waiting -> vote -> intro -> countdown -> playing -> ending -> results -> vote | waiting`.
 - Authority split:
@@ -69,7 +69,7 @@ Server limits and timings (rules shared with the client are in `rules.ts` / `cat
 
 | Constant | Value | Use |
 |---|---|---|
-| `ROOM_MAX_CLIENTS` | 18 | `maxClients` (lobby size, not round size); deploy `roomSize`; cap on `boom` targets |
+| `ROOM_MAX_CLIENTS` | 6 | `maxClients` (lobby size, not round size); deploy `roomSize`; cap on `boom` targets |
 | `TEAM_MAX` | 3 | seats per side in a round (round = 6); `pickTeam` returns `""` when both are full |
 | `MIN_PLAYERS` | 2 | players with `inMatch` needed for a vote/round |
 | `TICK_MS` / `PATCH_MS` | 50 / 50 | simulation interval / state patch rate |
@@ -280,7 +280,7 @@ Helpers used everywhere: `player(client)`, `fighting()` (phase is `playing` or `
 
 ### 5.2 Lifecycle
 
-- `onCreate(options)`: `options.private === true` calls `setPrivate(true)` (joinable by id only). Sets metadata `{ mode: 1, modeName: "Team Battle", started: false }` and starts `tick` every `TICK_MS`.
+- `onCreate(options)`: `options.private === true` calls `setPrivate(true)` (joinable by id only). Sets metadata `{ mode: 1, modeName: "Team Battle" }` (no `started` flag: Open Rooms shows started rooms as "Locked") and starts `tick` every `TICK_MS`.
 - `onAuth(client, options, context)`: token from `options.token` (or `context.token`) goes to `verifyToken`. Verified: returns the Bloxity identity with `verified: true, dev: false`. Otherwise a guest: `userId = guest_<sessionId>`, `username = options.name` (max 32) or `"Guest"`, `pfp` if a valid URL. Outside production, `options.devUser` matching `/^dev-[a-z0-9-]{4,40}$/` becomes the `userId` with `dev: true`. `onAuth` never rejects.
 - `onJoin(client, options, auth)`: creates the `PlayerState` (name, pfp, `signedIn`, `uid`, `outfitKey` (verified key wins over `options.outfitKey`), `avatar` from `options.avatar`, `party` from `options.party`, `life = "dead"`), creates the `Session` with a default profile and `graceUntil = now + TIMING.joinGraceMs`, calls `evictOthers`, then `loadSession` (async; answers with `profile`).
 - `onLeave(client, code)`: any code other than `CloseCode.CONSENTED` first awaits `allowReconnection(client, RECONNECT_SECONDS)`. On reconnect: `graceUntil = now + 3000`, `profile` is re-sent, the player keeps team, life and stats. On timeout or a consented leave: `leaveMatch` (penalty if applicable), `persist`, then the player and session are deleted. During the 20 s window the player stays in the state and in the round.
@@ -288,7 +288,7 @@ Helpers used everywhere: `player(client)`, `fighting()` (phase is `playing` or `
 
 ### 5.3 Round phase machine
 
-`setPhase(phase, seconds)` writes `phase`/`phaseLeft` and updates metadata (`started` is true only in `playing`). `tick(dt)` (dt clamped to 0.25 s) first clears emotes older than 6 s, then:
+`setPhase(phase, seconds)` writes `phase`/`phaseLeft` (room metadata is not touched: no `started` flag). `tick(dt)` (dt clamped to 0.25 s) first clears emotes older than 6 s, then:
 
 | Phase | Length | On entry | Exit |
 |---|---|---|---|
@@ -443,7 +443,7 @@ Called from `onJoin` and after an `auth` switch, only for verified or dev identi
 
 All best-effort; failures are logged or swallowed, never thrown into the room.
 
-- `installRoomReporter()` (needs `BLOXITY_REPORT_TOKEN`, `BLOXITY_GAME_ID`, `MATCHMAKER_REPORT_URL`): every 2 s `POST {MATCHMAKER_REPORT_URL}/{gameId}/rooms` with `{ podName, players, rooms: [{ colyseusRoomId, name, clients, maxClients, locked, private, started, metadata }] }` built from `matchMaker.query({})`. `started` comes from the room metadata.
+- `installRoomReporter()` (needs `BLOXITY_REPORT_TOKEN`, `BLOXITY_GAME_ID`, `MATCHMAKER_REPORT_URL`): every 2 s `POST {MATCHMAKER_REPORT_URL}/{gameId}/rooms` with `{ podName, players, rooms: [{ colyseusRoomId, name, clients, maxClients, locked, private, started, metadata }] }` built from `matchMaker.query({})`. `started` is always `false`: Bloxity's Open Rooms list renders a room that reports `started` as "Locked", and this room is joinable at any time (mid-round joiners are seated or queued), so reporting `started: true` made every room in a round look locked.
 - `queueScores(userId, entries)`: appends `{ board, userId, score }` for each finite value above 0 (rounded). `queueStats(userId, values)`: keeps the latest values per user, limited to keys in `STAT_DEFINITIONS`, clamped to `0..1e9` (`number`) or `0..1e12` (`currency`). Both ignore a null `userId`.
 - `flushReports()` (needs token and game id; without them the queues are just cleared): scores in batches of `REPORT_BATCH` to `POST {apiUrl()}/v1/leaderboards/hosted/{gameId}/report` with `{ boards: BOARDS, scores }`; stats to `POST {apiUrl()}/v1/games/{gameId}/stats` with `{ definitions: STAT_DEFINITIONS, players: [{ userId, values }] }`. A failed batch is logged and dropped. Re-entrant calls return immediately.
 - `installReporters()`: `installRoomReporter()` plus a flush every `REPORT_EVERY_MS`. Flushes also happen in `finishRound` and `onDispose`.

@@ -1,9 +1,12 @@
 // Server limits and timings. Game rules shared with the client live in rules.ts / catalog.ts.
 
 // Connections per room (the deploy reads this number as `roomSize`): the lobby holds up to this many.
-export const ROOM_MAX_CLIENTS = 18;
-// Players per side in a round; a round seats MATCH_MAX = 2 x TEAM_MAX (6). Players who pressed Play
-// beyond that wait in the queue for the next round (those who sat out go first).
+// Kept equal to a round's seats (2 x TEAM_MAX) so nobody waits in a queue: when a room is full the
+// matchmaker sends the next player to another room. Keep it a literal integer (the deploy greps it).
+export const ROOM_MAX_CLIENTS = 6;
+// Players per side in a round; a round seats MATCH_MAX = 2 x TEAM_MAX (6). With ROOM_MAX_CLIENTS = 6
+// everyone fits; if the room is ever larger, players who pressed Play beyond the seats wait in the
+// queue for the next round (those who sat out go first).
 export const TEAM_MAX = 3;
 // A round needs this many players who pressed Play; fewer and the room waits.
 export const MIN_PLAYERS = 2;

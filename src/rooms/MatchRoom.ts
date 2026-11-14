@@ -468,7 +468,9 @@ export class MatchRoom extends Room<{ state: MatchState }> {
   onCreate(options?: { private?: unknown }) {
     // ?instantMultiplayer=true (Play with friends): a private room, joined only by its id.
     if (options?.private === true) void this.setPrivate(true);
-    void this.setMetadata({ mode: 1, modeName: "Team Battle", started: false } as any);
+    // No `started` flag: Bloxity's Open Rooms shows a room that reports started as "Locked", but
+    // anyone can join this room at any time (mid-round joiners are seated or queued).
+    void this.setMetadata({ mode: 1, modeName: "Team Battle" } as any);
     this.setSimulationInterval((dt) => this.tick(dt / 1000), TICK_MS);
   }
 
@@ -899,7 +901,6 @@ export class MatchRoom extends Room<{ state: MatchState }> {
   private setPhase(phase: string, seconds = 0) {
     this.state.phase = phase;
     this.state.phaseLeft = seconds;
-    void this.setMetadata({ mode: 1, modeName: "Team Battle", started: phase === "playing" } as any);
   }
 
   private startVote() {
