@@ -1,17 +1,37 @@
-// Shop prices and the starting profile: a copy of the client's src/config.js WEAPONS / SKINS /
-// OPERATIVES / STORE / START_PROFILE / RANKS. Keep in step with it by hand. Everything is priced
-// in coins earned by playing: nothing is ever sold for premium currency (Gems).
+import { GEMS_MAX } from "./rules.js";
 
+// Shop prices and the starting profile: a copy of the client's src/config.js WEAPONS / SKINS /
+// OPERATIVES / STORE / GRENADES / PASSES / START_PROFILE / RANKS. Keep in step with it by hand.
+// Skins, operatives and the Store are priced in coins; weapons, grenades and passes in the game's
+// own Gems (`gems`, earned by eliminations and rounds, rules.ts GEMS). Both are earned by playing
+// only: nothing is ever sold for premium currency (Bloxity Gems) or real money.
+
+// Weapons are priced in the game's own Gems (earned by playing, never sold). Weapons already
+// bought with coins before the Gem store stay owned.
 export const WEAPON_PRICES: Record<string, { slot: "primary" | "secondary" | "melee" | "fists"; price: number }> = {
   striker: { slot: "primary", price: 0 },
   viper: { slot: "secondary", price: 0 },
-  hornet: { slot: "secondary", price: 400 },
-  thunder: { slot: "primary", price: 1500 },
-  tempest: { slot: "primary", price: 2500 },
+  hornet: { slot: "secondary", price: 600 },
+  talon: { slot: "secondary", price: 1200 },
+  wasp: { slot: "secondary", price: 900 },
+  ridgeback: { slot: "primary", price: 1500 },
+  kestrel: { slot: "primary", price: 1800 },
+  tempest: { slot: "primary", price: 2400 },
   marksman: { slot: "primary", price: 2200 },
-  hawk: { slot: "primary", price: 3200 },
+  hawk: { slot: "primary", price: 3500 },
+  thunder: { slot: "primary", price: 1200 },
+  breaker: { slot: "primary", price: 1500 },
+  cyclone: { slot: "primary", price: 2600 },
+  ronin: { slot: "secondary", price: 2500 },
+  mender: { slot: "secondary", price: 3000 },
   knife: { slot: "melee", price: 0 },
   fists: { slot: "fists", price: 0 },
+};
+// Throwables (T), in Gems; `frag` is the starter.
+export const GRENADE_PRICES: Record<string, number> = { frag: 0, pulse: 800, breach: 1200 };
+// A pass unlocks a set of weapons for good (also ones added to it later), in Gems.
+export const PASSES: Record<string, { price: number; weapons: string[] }> = {
+  basic: { price: 3500, weapons: ["hornet", "talon", "wasp", "ridgeback", "thunder", "breaker"] },
 };
 
 export const SKIN_PRICES: Record<string, number> = {
@@ -46,9 +66,10 @@ export const MODES = ["clash", "squad"];
 
 export interface Profile {
   coins: number;
+  gems: number; // the game's own currency, earned by eliminations (never bought)
   rp: number;
-  owned: { weapons: string[]; skins: string[]; operatives: string[]; emotes: string[] };
-  loadout: { primary: string; secondary: string; operative: string; emote: string; skin: Record<string, string> };
+  owned: { weapons: string[]; skins: string[]; operatives: string[]; emotes: string[]; grenades: string[]; passes: string[] };
+  loadout: { primary: string; secondary: string; operative: string; emote: string; grenade: string; skin: Record<string, string> };
   upgrades: Record<string, number>;
   stats: { matches: number; wins: number; eliminations: number; deaths: number; damage: number; best: number };
   mode: string;
@@ -56,9 +77,10 @@ export interface Profile {
 
 export const START_PROFILE: Profile = {
   coins: 600,
+  gems: 0,
   rp: 0,
-  owned: { weapons: ["striker", "viper", "knife", "fists"], skins: ["standard"], operatives: ["rook"], emotes: ["wave"] },
-  loadout: { primary: "striker", secondary: "viper", operative: "rook", emote: "wave", skin: { striker: "standard", viper: "standard" } },
+  owned: { weapons: ["striker", "viper", "knife", "fists"], skins: ["standard"], operatives: ["rook"], emotes: ["wave"], grenades: ["frag"], passes: [] },
+  loadout: { primary: "striker", secondary: "viper", operative: "rook", emote: "wave", grenade: "frag", skin: { striker: "standard", viper: "standard" } },
   upgrades: {},
   stats: { matches: 0, wins: 0, eliminations: 0, deaths: 0, damage: 0, best: 0 },
   mode: "clash",
@@ -78,16 +100,22 @@ export function normalizeProfile(raw: any): Profile {
   const p = clone(START_PROFILE);
   if (!raw || typeof raw !== "object") return p;
   p.coins = num(raw.coins, COINS_MAX);
+  p.gems = num(raw.gems, GEMS_MAX);
   p.rp = num(raw.rp, RP_MAX);
   p.owned.weapons = [...new Set([...START_PROFILE.owned.weapons, ...ids(raw.owned?.weapons, (id) => id in WEAPON_PRICES)])];
   p.owned.skins = [...new Set([...START_PROFILE.owned.skins, ...ids(raw.owned?.skins, (id) => id in SKIN_PRICES)])];
   p.owned.operatives = [...new Set([...START_PROFILE.owned.operatives, ...ids(raw.owned?.operatives, (id) => id in OPERATIVE_PRICES)])];
   p.owned.emotes = [...new Set([...START_PROFILE.owned.emotes, ...ids(raw.owned?.emotes, (id) => EMOTES.includes(id))])];
+  p.owned.grenades = [...new Set([...START_PROFILE.owned.grenades, ...ids(raw.owned?.grenades, (id) => id in GRENADE_PRICES)])];
+  p.owned.passes = ids(raw.owned?.passes, (id) => id in PASSES);
+  // A pass keeps unlocking its whole set, including weapons added to it later.
+  for (const pass of p.owned.passes) p.owned.weapons = [...new Set([...p.owned.weapons, ...PASSES[pass].weapons])];
   const lo = raw.loadout ?? {};
   if (p.owned.weapons.includes(lo.primary) && WEAPON_PRICES[lo.primary].slot === "primary") p.loadout.primary = lo.primary;
   if (p.owned.weapons.includes(lo.secondary) && WEAPON_PRICES[lo.secondary].slot === "secondary") p.loadout.secondary = lo.secondary;
   if (p.owned.operatives.includes(lo.operative)) p.loadout.operative = lo.operative;
   if (p.owned.emotes.includes(lo.emote)) p.loadout.emote = lo.emote;
+  if (p.owned.grenades.includes(lo.grenade)) p.loadout.grenade = lo.grenade;
   if (lo.skin && typeof lo.skin === "object") {
     for (const [w, s] of Object.entries(lo.skin)) {
       if (w in WEAPON_PRICES && typeof s === "string" && p.owned.skins.includes(s)) p.loadout.skin[w] = s;
@@ -110,6 +138,12 @@ function spend(p: Profile, price: number): boolean {
   p.coins -= price;
   return true;
 }
+// Gems are only ever earned in matches; spending them is the only way they leave the profile.
+function spendGems(p: Profile, price: number): boolean {
+  if (p.gems < price) return false;
+  p.gems -= price;
+  return true;
+}
 
 export function buy(p: Profile, kind: unknown, id: unknown): string | null {
   if (typeof id !== "string") return "unknown";
@@ -117,8 +151,24 @@ export function buy(p: Profile, kind: unknown, id: unknown): string | null {
     const w = WEAPON_PRICES[id];
     if (!w) return "unknown";
     if (p.owned.weapons.includes(id)) return "owned";
-    if (!spend(p, w.price)) return "coins";
+    if (!spendGems(p, w.price)) return "gems";
     p.owned.weapons.push(id);
+    return null;
+  }
+  if (kind === "grenade") {
+    if (!(id in GRENADE_PRICES)) return "unknown";
+    if (p.owned.grenades.includes(id)) return "owned";
+    if (!spendGems(p, GRENADE_PRICES[id])) return "gems";
+    p.owned.grenades.push(id);
+    return null;
+  }
+  if (kind === "pass") {
+    const pass = PASSES[id];
+    if (!pass) return "unknown";
+    if (p.owned.passes.includes(id)) return "owned";
+    if (!spendGems(p, pass.price)) return "gems";
+    p.owned.passes.push(id);
+    p.owned.weapons = [...new Set([...p.owned.weapons, ...pass.weapons])];
     return null;
   }
   if (kind === "skin") {
@@ -176,6 +226,11 @@ export function equip(p: Profile, kind: unknown, id: unknown, weapon?: unknown):
   if (kind === "emote") {
     if (!p.owned.emotes.includes(id)) return "locked";
     p.loadout.emote = id;
+    return null;
+  }
+  if (kind === "grenade") {
+    if (!p.owned.grenades.includes(id)) return "locked";
+    p.loadout.grenade = id;
     return null;
   }
   if (kind === "mode") {

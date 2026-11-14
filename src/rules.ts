@@ -10,6 +10,9 @@ export interface WeaponRule {
   range: number; // m
   headMul: number;
   pellets?: number;
+  melee?: boolean; // a blade / fists blow (no headshots, melee range slack)
+  pierce?: number; // share of the armour's damage cut ignored (0..1)
+  heal?: number; // HP a hit gives a teammate (medic weapons); enemies take `damage`
 }
 
 export const WEAPONS: Record<string, WeaponRule> = {
@@ -20,8 +23,22 @@ export const WEAPONS: Record<string, WeaponRule> = {
   tempest: { slot: "primary", damage: 31, interval: 0.085, range: 130, headMul: 1.8 },
   marksman: { slot: "primary", damage: 72, interval: 0.32, range: 260, headMul: 2.2 },
   hawk: { slot: "primary", damage: 165, interval: 1.25, range: 400, headMul: 2.5 },
-  knife: { slot: "melee", damage: 60, interval: 0.55, range: 2.7, headMul: 1 },
-  fists: { slot: "fists", damage: 22, interval: 0.42, range: 2.1, headMul: 1 },
+  talon: { slot: "secondary", damage: 68, interval: 0.42, range: 90, headMul: 2.2 },
+  wasp: { slot: "secondary", damage: 19, interval: 0.058, range: 60, headMul: 1.7 },
+  ridgeback: { slot: "primary", damage: 41, interval: 0.125, range: 150, headMul: 2 },
+  kestrel: { slot: "primary", damage: 33, interval: 0.095, range: 160, headMul: 2, pierce: 0.5 },
+  breaker: { slot: "primary", damage: 24, pellets: 9, interval: 0.3, range: 22, headMul: 1.5 },
+  cyclone: { slot: "primary", damage: 14, pellets: 7, interval: 0.28, range: 24, headMul: 1.4 },
+  ronin: { slot: "secondary", damage: 70, interval: 0.6, range: 3.2, headMul: 1, melee: true },
+  mender: { slot: "secondary", damage: 12, interval: 0.25, range: 35, headMul: 1.5, heal: 10 },
+  knife: { slot: "melee", damage: 60, interval: 0.55, range: 2.7, headMul: 1, melee: true },
+  fists: { slot: "fists", damage: 22, interval: 0.42, range: 2.1, headMul: 1, melee: true },
+};
+// Throwables (T). The loadout picks one; `frag` is the starter. Client config.js GRENADES.
+export const GRENADES: Record<string, { damage: number; radius: number; fuse: number }> = {
+  frag: { damage: 170, radius: 6.5, fuse: 1.9 },
+  pulse: { damage: 120, radius: 8.5, fuse: 1.2 },
+  breach: { damage: 230, radius: 5, fuse: 2.4 },
 };
 export const FALLOFF_START = 0.6; // share of range after which damage falls to 60% at full range
 
@@ -112,6 +129,21 @@ export const REWARDS = {
   rpPerElim: 3,
   leavePenaltyRp: -12, // leaving a running round: half the coins and at least this rank loss
 };
+
+// Gems: the game's own currency (NOT Bloxity Gems, not premium currency). Earned only by playing,
+// never sold for real money or Bloxity Gems. Granted at once by `eliminate` / `knock` (an enemy,
+// during `playing`) and announced to the shooter with `reward`; client config.js GEMS.
+export const GEMS = {
+  perElimination: 12,
+  perKnock: 3,
+  headshot: 3, // extra on a headshot elimination
+  streak: 4, // extra per elimination beyond the first in a streak (Double +4, Triple +8, ...)
+  streakCap: 5, // the streak bonus stops growing here
+  win: 40, // at the results (not when leaving a running round)
+  loss: 15,
+  mvp: 25,
+};
+export const GEMS_MAX = 1e9;
 
 export function damageFalloff(w: WeaponRule, dist: number): number {
   const start = w.range * FALLOFF_START;

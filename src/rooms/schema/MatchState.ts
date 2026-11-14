@@ -15,6 +15,8 @@ export const PlayerState = schema(
     avatar: t.string().default(""), // Bloxity look JSON { equipped (ids only, incl. characterId), proportions, outfitKey }, "" = default
     outfitKey: t.string().default(""), // Bloxity outfit key: verified by Bloxity at join, then the player's own updates
     party: t.string().default(""), // Bloxity party room key: party members share a team
+    squad: t.string().default(""), // in-game team (lobby party) id, "" = solo; squad members queue and play together
+    squadLead: t.boolean().default(false), // the squad's leader: only they press Play for the squad
 
     inMatch: t.boolean().default(false), // pressed Play (in the round or waiting for one)
     team: t.string().default(""), // "blue" | "orange" | "" (in the menus)

@@ -62,20 +62,24 @@ Every handler ignores the message when the sender has no player/session. "Fighti
 
 | Type | Payload | Sent by (client) | Server action | Reply / broadcast |
 |---|---|---|---|---|
-| `play` | `{ mode }` (`'clash'` or `'squad'`) | `main.js startMatchFlow` (PLAY), with `profile.mode` | Ignored if already `inMatch`. Sets `inMatch`, `voteMode`, `vote = -1`; in a running phase seats the player at once (`joinRound`) | State; `spawn { id, first: true }` to all when seated mid-round |
+| `play` | `{ mode }` (`'clash'` or `'squad'`) | `main.js startMatchFlow` (PLAY), with `profile.mode` | Ignored if already `inMatch` (unless the sender leads a squad). In a squad only the leader may press it (a member gets `squadNote { kind: 'notLeader' }`) and it queues every member of the squad that is not `inMatch` yet. Sets `inMatch`, `voteMode`, `vote = -1`; in a running phase seats the player at once (`joinRound`) if a side has room (`TEAM_MAX` = 3 each), otherwise they stay queued with an empty `team` | State; `spawn { id, first: true }` to all when seated mid-round |
 | `getProfile` | none | `save.js` on the local `joined` event and after a refused `shop` | Re-sends the profile if loaded | `profile` to the sender |
-| `leave` | none | `main.js leaveMatch` (HUD and results "Lobby", queue "Leave the team") | `leaveMatch`: leave penalty in a running round, back to the menus, team check | `rewards` + `profile` to the sender when penalised; possibly `matchEnd` to all |
+| `leave` | none | `main.js leaveMatch` (HUD and results "Lobby", queue "Leave the team" when not in a squad) | `leaveMatch`: leave penalty in a running round, back to the menus, team check. A squad that is only queued (`inMatch`, no `team` yet) leaves the queue together; in a seated round only the sender leaves | `rewards` + `profile` to the sender when penalised; possibly `matchEnd` to all |
 | `vote` | `{ map }` int `0..MAP_COUNT-1` (server also accepts `mode`) | `main.js` `onVote` (map card click in `lobby.js`) | Only in phase `vote` with `inMatch`: sets `vote` (and `voteMode`) | State |
+| `invite` | `{ to }` sessionId | `party.js` (the + in the lobby's "Players online" dock / list) | `onInvite`: 500 ms gap per sender, sender not `inMatch`, target exists, not `inMatch` (`busy`), not in a squad (`inTeam` / `sameTeam`), sender's squad below `SQUAD_MAX` (`full`), no duplicate (`dup`), at most `INVITE_MAX_PENDING` open. Creates an invite that expires after `INVITE_TTL_S` (20 s) | `invite` to the target and `squadNote { kind: 'sent' }` to the sender, or a refusing `squadNote` to the sender |
+| `inviteReply` | `{ id, accept }` | `party.js` (Accept / Decline on the invite card) | Only the invited player. Decline: `squadNote { kind: 'declined' }` to the inviter. Accept: re-checks both sides (not `inMatch`, target not in a squad, room in the inviter's squad); creates the squad (id `s<n>`, the inviter is `squadLead`) when the inviter had none; sets the target's `squad` | `squadNote` `joined` to the existing members, `welcome` to the new one; `gone` / `youInTeam` / `teamFull` on a stale accept |
+| `leaveSquad` | none | `main.js onLeaveTeam` ("Leave the team" in a squad) | Leaves the queue first when the squad was only queued, then `removeFromSquad`: the lead passes to the next member, a squad of one dissolves | `squadNote` `left` / `leader` / `disbanded` to the rest |
+| `kick` | `{ t }` sessionId | `party.js` (the x on a teammate) | Only the squad leader, only while neither is `inMatch` | `squadNote` `youKicked` to the target, `kicked` to the rest |
 | `pose` | `{ x, y, z, yaw, pitch, speed, flags, slot }` | `online.js sendPose`, up to `NET.poseHz` (20) per second while in a match | Bounds and speed checks, then writes the pose (section 6) | State |
 | `avatar` | `{ avatar, outfitKey }` (JSON string max 4000; key pattern or `""`) | `main.js sendAvatar` (auth change, avatar change, proportions change) | Sets `avatar` / `outfitKey` when valid | State |
 | `emote` | `{ emote }`: `wave`, `dance`, `salute`, `flex`, `cheer`, `portal:<id>` or `""` | `controller.js playEmote` (Z key, portal emote button); `updateController` sends `""` when moving or firing cancels it | Alive only. `""` clears. Must match `EMOTE_RE`; non-portal emotes must be owned. Cleared by the server after 6 s, when `speed > 1.2`, on damage | State (`emote`) |
 | `auth` | `{ token, name, pfp }` | `main.js` (`bloxity.subscribeAuth`) when the Bloxity user changes after the first connect | Re-verifies; on a different id saves the old profile, switches identity, loads the new profile | `profile` (or `serverError`) to the sender; possibly closes other sessions with 4100 |
-| `buy` | `{ kind, id }`, `kind`: `weapon`, `skin`, `operative`, `store` | `save.js purchase` (`buyWeapon`, `buySkin`, `buyOperative`, `buyStoreItem`), applied optimistically | `catalog.buy`; saves | `shop` to the sender always; `profile` on success |
-| `equip` | `{ kind, id, weapon? }`, `kind`: `weapon`, `skin` (with `weapon`), `operative`, `emote`, `mode` | `save.js equip` (`equipWeapon`, `equipSkin`, `equipOperative`, `equipEmote`, `setMode`), optimistic | `catalog.equip`; visible loadout updated now (menus) or at the next spawn (in a round); saves. Ignored while the profile is loading | `profile` on success; `shop { ok: false }` on refusal |
+| `buy` | `{ kind, id }`, `kind`: `weapon`, `grenade`, `pass` (Gems), `skin`, `operative`, `store` (coins) | `save.js purchase` (`buyWeapon`, `buyGrenade`, `buyPass`, `buySkin`, `buyOperative`, `buyStoreItem`), applied optimistically | `catalog.buy`; saves | `shop` to the sender always; `profile` on success |
+| `equip` | `{ kind, id, weapon? }`, `kind`: `weapon`, `skin` (with `weapon`), `operative`, `emote`, `grenade`, `mode` | `save.js equip` (`equipWeapon`, `equipSkin`, `equipOperative`, `equipEmote`, `equipGrenade`, `setMode`), optimistic | `catalog.equip`; visible loadout updated now (menus) or at the next spawn (in a round); saves. Ignored while the profile is loading | `profile` on success; `shop { ok: false }` on refusal |
 | `shot` | `{ w, o: [x,y,z], e: [[x,y,z], ...] }` (max 12 end points, 2 decimals) | `combat.js fire`, every gun shot (not melee) | Alive, fighting, weapon carried, valid `o` | `shot` to all but the sender |
-| `hit` | `{ t, w, s, n, h, d }`: target sid, weapon id, shot number, pellets that hit, of them headshots, distance (m, 1 decimal) | `combat.js fire` (one per target hit by the shot) and `resolveMelee` (`n: 1, h: 0`) | `onHit`: team, life, loadout, fire rate, range; computes and applies damage | `dmg`, then possibly `knock`, `elim`, `matchEnd`, to all |
-| `throw` | `{ p: [x,y,z], v: [x,y,z] }` (start, velocity m/s) | `items.js release` (frag leaves the hand) | Alive, fighting, 400 ms rate limit; counts a pending frag (max 3) | `throw` to all but the sender |
-| `boom` | `{ x, y, z, t: [sid, ...] }` (blast point, targets in the blast with line of sight) | `combat.js explode` (the local player's frag fuse ran out) | `onBoom`: needs a pending throw not older than fuse + 3 s, within 60 m of the thrower; damage by server distance | `boom` to all but the sender; `dmg` etc. to all |
+| `hit` | `{ t, w, s, n, h, d }`: target sid, weapon id, shot number, pellets that hit, of them headshots, distance (m, 1 decimal) | `combat.js fire` (one per target hit by the shot) and `resolveMelee` (`n: 1, h: 0`) | `onHit`: team, life, loadout, fire rate, range; computes and applies damage (armour-piercing weapons ignore part of the armour cut); a medic weapon (`heal`) on a teammate heals instead (HP, or the bleed-out pool when knocked) | `dmg`, then possibly `knock`, `elim`, `matchEnd`, to all; a heal: `healed` to all |
+| `throw` | `{ p: [x,y,z], v: [x,y,z] }` (start, velocity m/s) | `items.js release` (the grenade leaves the hand) | Alive, fighting, 400 ms rate limit; counts a pending throw (max 3); the kind is the profile's `loadout.grenade` | `throw` (with `k`) to all but the sender |
+| `boom` | `{ x, y, z, t: [sid, ...] }` (blast point, targets in the blast with line of sight) | `combat.js explode` (the local player's frag fuse ran out) | `onBoom`: needs a pending throw not older than its fuse + 3 s, within 60 m of the thrower; damage, radius and fuse from `GRENADES[kind]`, by server distance | `boom` to all but the sender; `dmg` etc. to all |
 | `wall` | `{ x, y, z, yaw }` | `items.js deployWall` | Alive, fighting, 300 ms rate limit, within 8 m of the sender | `wall` to all but the sender |
 | `heal` | none | `items.js updateActorItems` when the medkit timer (2.2 s) completes | Alive, fighting, 1.76 s rate limit; +80 HP up to 200 | State (`hp`) |
 | `ult` | none | `items.js useUltimate` (Q) | Alive, fighting, 18 s gap; Jin heals, others set `ultUntil` | `ult` to all, sender included |
@@ -98,7 +102,8 @@ All listed types are registered in `net.js MESSAGES` and forwarded to `onNet(typ
 |---|---|---|---|---|
 | `profile` | `{ profile, saved, userId }` (`Profile`; `saved`: stored for this identity; `userId`: verified id or `""`) | After the profile loads, on `getProfile`, after a successful `buy`/`equip`, with every reward, after a reconnect | one | `save.js`: replaces the mirrored `profile`, sets `account.loaded` / `account.saved`, notifies `onProfile` listeners. `userId` is not read |
 | `shop` | `{ ok, kind, id, error }`, `error`: `null`, `loading`, `unknown`, `owned`, `coins`, `locked`, `slot` | Every `buy`; a refused `equip` | one | `save.js`: on `ok: false` sends `getProfile` to resync |
-| `rewards` | `{ won, mvp, coins, rp, eliminations, knocks, assists, damage, deaths, headshots, score: { blue, orange } }` | End of the round (`finishRound`), or on leaving a running round | one | `main.js`: stored; `showRoundResults` -> `results.js showResults` |
+| `rewards` | `{ won, mvp, coins, gems, gemsRound, rp, eliminations, knocks, assists, damage, deaths, headshots, score: { blue, orange } }` (`gemsRound`: the round's Gems, granted now; `gems`: everything the round earned, kills included) | End of the round (`finishRound`), or on leaving a running round | one | `main.js`: stored; `showRoundResults` -> `results.js showResults` |
+| `reward` | `{ k, t, gems, coins, rp, h, s, b, total }`: `elim` / `knock`, target sid, Gems granted now, coins and rank points this kill adds to the round's `rewards`, headshot, streak, streak bonus Gems, the new Gems balance | The player knocks or eliminates an enemy during `playing` | one (the shooter) | `save.js`: `profile.gems = total`; `online.js`: bus `reward { kind, target, gems, coins, rp, head, streak, bonus }` -> HUD kill popup and multi-kill banner |
 | `serverError` | `{ reason: 'load' }` | The profile could not be read from the database | one | no listener |
 | `round` | `{ round }` | `startRound` | all | no listener (the client follows `state.phase`) |
 | `spawn` | `{ id, first }` | Round start, mid-round join, respawn | all | `online.js`: own id -> `match.spawnActor(G.player, first)` (picks the position; bus `spawn`), skipped for a first spawn when already alive; others -> pose buffer cleared, `life = 'alive'` |
@@ -107,13 +112,17 @@ All listed types are registered in `net.js MESSAGES` and forwarded to `onNet(typ
 | `elim` | `{ t, k, w, h, s }`: victim, killer sid or `""`, weapon id / `zone` / `frag` / `""`, head, killer's streak | A player is eliminated | all | sets `life = 'dead'`; for the local player `respawnAt = G.time + NET.respawnFallback`; bus `elimination { target, killer, weapon, head, streak }` |
 | `revive` | `{ t, b }` revived sid, reviver sid | A revive succeeds | all | sets `life = 'alive'`; effects; bus `revive { target, by }` |
 | `shot` | `{ id, w, o, e }` | Relay of `shot` | all but the sender | `online.js`: muzzle flash, tracers, sound, near-miss whiz, switches the remote actor's held weapon; bus `shot { actor, pos, recoil }` |
-| `throw` | `{ id, p, v }` | Relay of `throw` | all but the sender | `items.js remoteThrow`: a visual grenade that vanishes at the fuse |
+| `throw` | `{ id, p, v, k }` (`k`: the grenade kind) | Relay of `throw` | all but the sender | `items.js remoteThrow`: a visual grenade of that kind that vanishes at its fuse |
+| `healed` | `{ t, a, n }`: healed sid, healer sid, HP | A medic weapon healed a teammate | all | bus `heal { target, by, amount }` (green numbers for the healer) |
 | `boom` | `{ id, x, y, z }` | A frag exploded | all but the sender | `combat.js explodeVisual` (bus `explosion`); `id` is not read |
 | `wall` | `{ id, x, y, z, yaw }` | Relay of `wall` | all but the sender | `items.js remoteWall`: a real collider locally (bus `wall`) |
 | `ult` | `{ id, op }` | An ability was accepted | all | `items.js ultVisual(actor, op)` (bus `ultimate`) |
 | `opened` | `{ c, by }` or `{ d, by }` | A crate or airdrop was opened | all | `loot.js markOpened(c, d)` unless `by` is the local player |
 | `openFail` | `{ c }` or `{ d }` | `open` refused (already open, unknown drop, drop still falling) | sender | no listener |
 | `matchEnd` | `{ winner }` (`blue` / `orange`) | The round is decided (`end`) | all | bus `matchEnd { winner }` (slow motion, banner) |
+| `invite` | `{ id, from, name, pfp, size, ttl }` (`size` = members of the inviter's squad, 1 = solo; `ttl` s) | Another player invited this one | one | `party.js`: an Accept / Decline card with a countdown bar (up to 3 shown) |
+| `inviteEnd` | `{ id }` | The invite expired, or the inviter queued / left | one | `party.js`: removes the card |
+| `squadNote` | `{ kind, name? }`; `kind`: `sent`, `busy`, `youBusy`, `inTeam`, `sameTeam`, `full`, `dup`, `declined`, `expired`, `joined`, `welcome`, `left`, `kicked`, `youKicked`, `disbanded`, `leader`, `notLeader`, `gone`, `youInTeam`, `teamFull` | Every squad event that needs a message | one | `party.js`: a toast (`NOTES` maps a kind to its text, e.g. `busy` = "<name> is currently in a game and cannot view invitations at this time.") and clears that player's "Sent" mark |
 
 ## 5. Schema state the client reads
 
@@ -133,14 +142,15 @@ Field definitions are in `server.md` section 4. `net.state` is read directly eac
 | `players` (roster) | `online.js reconcile` (remote actors for players with `inMatch` and a team), `roster()` (lobby list, `main.js showMates`), `trackRoster` (friend-join notices), `main.js queueInfo` (ready count, votes) |
 | player `name`, `pfp`, `uid` | remote actor name/portrait/chat bubbles (`makeRemote`, `applyRemote`), lobby roster, vote cards |
 | player `avatar`, `outfitKey` | `online.js loadRemoteAvatar` (remote actors), `main.js showMates` (lobby platform, prewarm) |
-| player `inMatch`, `team`, `vote` | `syncFlow`, `queueInfo`, `reconcile`; the local team in `applyState` |
+| player `inMatch`, `team`, `vote` | `syncFlow`, `queueInfo`, `reconcile`; the local team in `applyState`; the status text in `party.js` (`Playing` = `inMatch` + `team`, `In queue` = `inMatch`, else `In the lobby`) |
+| player `squad`, `squadLead` | `online.js roster()` -> `party.js` (dock, banner, name plates, PLAY / Leave the team states) and `main.js showMates` (only the squad's members stand on the lobby platform); `syncFlow` (a member whose leader pressed PLAY goes to `queue`) |
 | player `life`, `hp`, `downHp`, `vest`, `helmet`, `protectedUntil` | `applyState` (local player mirror) and `applyRemote` |
 | player `x`, `y`, `z`, `yaw`, `pitch`, `flags`, `slot` | `applyRemote` (remote players only) |
 | player `primary`, `secondary`, `skinPrimary`, `skinSecondary`, `operative` | `match.js createMatch` (local loadout for the round), `makeRemote` / `applyRemote`, lobby roster |
 | player `emote`, `ultUntil` | `applyRemote` (remote players; `shade` -> cloak, others -> ability aura) |
 | player `kills`, `deaths`, `assists`, `knocks`, `headshots`, `damage` | `online.js copyStats` (scoreboard, MVP, results) |
 
-Synced but not read by the client: `signedIn`, `party`, `voteMode`, `deadAt`, `killer`, `speed`.
+Synced but not read by the client: `signedIn`, `party` (the Bloxity party key; `squad` is the in-game lobby team), `voteMode`, `deadAt`, `killer`, `speed`.
 
 The `avatar` string is `JSON.stringify({ equipped, proportions, outfitKey })` (`avatar/look.js lookToJson`): Bloxity ids only. `lookFromJson` drops any `equipped` value containing `/` or `:` and prefers the state's `outfitKey` over the one inside the JSON.
 
@@ -206,7 +216,11 @@ Values that exist on both sides and must be changed together. Status is from com
 | Island radius | `world/index.js` (`radius: 125`) | `ISLAND_RADIUS` | agree |
 | Zone generator and planner | `game/zone.js` | `zone.ts` | agree |
 | Loot (`respawn`, `airdropAt`, `airdropFall`) | `LOOT` | `LOOT` | agree |
-| Rewards | `REWARDS` (not read), `coinsPerElim: 12` literal in `main.js` (HUD notice) | `REWARDS` | agree |
+| Rewards | `REWARDS` (not read; the HUD shows the amounts in `reward`) | `REWARDS` | agree |
+| Gems | `GEMS` (not read) | `rules.ts GEMS` | agree |
+| Weapon rules and Gem prices | `WEAPONS` (incl. `melee`, `pierce`, `heal`, `price`) | `rules.ts WEAPONS`, `catalog.ts WEAPON_PRICES` | agree |
+| Grenades | `GRENADES` | `rules.ts GRENADES`, `catalog.ts GRENADE_PRICES` | agree |
+| Weapon pass | `PASSES` + the `tier: 'basic'` weapons | `catalog.ts PASSES` | agree |
 | Leaderboards | `LEADERBOARDS` | `reporters.ts BOARDS` | agree |
 | Pose flags | `online.js FLAG` | `MatchState.ts FLAG` | agree |
 | Replaced close code | `net.js REPLACED_CODE` | `constants.ts REPLACED_CODE` | agree (4100) |

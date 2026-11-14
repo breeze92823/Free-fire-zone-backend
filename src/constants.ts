@@ -1,10 +1,18 @@
 // Server limits and timings. Game rules shared with the client live in rules.ts / catalog.ts.
 
-// Players per room (the deploy reads this number as `roomSize`): two teams of TEAM_MAX.
+// Connections per room (the deploy reads this number as `roomSize`): the lobby holds up to this many.
 export const ROOM_MAX_CLIENTS = 18;
-export const TEAM_MAX = 9;
+// Players per side in a round; a round seats MATCH_MAX = 2 x TEAM_MAX (6). Players who pressed Play
+// beyond that wait in the queue for the next round (those who sat out go first).
+export const TEAM_MAX = 3;
 // A round needs this many players who pressed Play; fewer and the room waits.
 export const MIN_PLAYERS = 2;
+// The in-game team (lobby squad): up to a whole side. Invites from the lobby's "Players online" list
+// expire after INVITE_TTL_S; one invite per INVITE_GAP_MS from a player, at most INVITE_MAX_PENDING open.
+export const SQUAD_MAX = TEAM_MAX;
+export const INVITE_TTL_S = 20;
+export const INVITE_GAP_MS = 500;
+export const INVITE_MAX_PENDING = 6;
 
 // The room's simulation step (zone, regen, bleed-out, timers). Patches go out at patchRate.
 export const TICK_MS = 50;

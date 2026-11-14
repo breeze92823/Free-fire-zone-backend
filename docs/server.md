@@ -6,7 +6,7 @@ Everything here was written from the source in `src/`, `test/`, the build/deploy
 
 ## 1. Model in one page
 
-- One room type, `match` (`MatchRoom`). A room holds up to `ROOM_MAX_CLIENTS` (18) connections = two teams of `TEAM_MAX` (9). Real players only.
+- One room type, `match` (`MatchRoom`). A room holds up to `ROOM_MAX_CLIENTS` (18) connections (the lobby), but a round seats only two teams of `TEAM_MAX` (3) = 6 players. Players who pressed Play beyond that wait in the queue (`inMatch`, no team) and are seated first next round (`Session.lastSeat`). Real players only.
 - Everyone who joins is "in the menus" (`inMatch = false`, `life = "dead"`, no team). `play` sets `inMatch`. A round needs `MIN_PLAYERS` (2) players with `inMatch`.
 - Rounds run in the same room forever: `waiting -> vote -> intro -> countdown -> playing -> ending -> results -> vote | waiting`.
 - Authority split:
@@ -23,7 +23,7 @@ Node `>= 22` (`package.json` `engines`; Docker and CI use Node 22). The package 
 | `npm start` | `tsx watch src/index.ts` | Dev server with reload, port 2567. `NODE_ENV` unset, so dev-only features are on (see below). |
 | `npm run build` | `rimraf build && tsc -p tsconfig.build.json` | Emits `build/` from `src/` only (`tsconfig.build.json` narrows `include`). |
 | `npm run clean` | `rimraf build` | |
-| `npm test` | `mocha -r tsx test/**.test.ts --exit --timeout 15000` | Runs against TypeScript directly; no build needed. 8 tests pass on the current code (about 9 s). |
+| `npm test` | `mocha -r tsx test/**.test.ts --exit --timeout 15000` | Runs against TypeScript directly; no build needed. 9 tests pass on the current code (about 9 s). |
 
 `tsconfig.json`: `strict: true` with `strictNullChecks: false`, `target: ESNext`, `outDir: build`, `allowJs`, `useDefineForClassFields: false`, `experimentalDecorators: true` (the schema uses the `schema()` builder, not decorators).
 
@@ -69,14 +69,16 @@ Server limits and timings (rules shared with the client are in `rules.ts` / `cat
 
 | Constant | Value | Use |
 |---|---|---|
-| `ROOM_MAX_CLIENTS` | 18 | `maxClients`; deploy `roomSize`; cap on `boom` targets |
-| `TEAM_MAX` | 9 | party seating limit in `pickTeam` |
+| `ROOM_MAX_CLIENTS` | 18 | `maxClients` (lobby size, not round size); deploy `roomSize`; cap on `boom` targets |
+| `TEAM_MAX` | 3 | seats per side in a round (round = 6); `pickTeam` returns `""` when both are full |
 | `MIN_PLAYERS` | 2 | players with `inMatch` needed for a vote/round |
 | `TICK_MS` / `PATCH_MS` | 50 / 50 | simulation interval / state patch rate |
 | `NAME_MAX` | 32 | display name length |
 | `PFP_MAX_LEN` | 512 | profile picture URL length (must be `http(s)://`) |
 | `AVATAR_MAX_LEN` | 4000 | look JSON length |
 | `PARTY_MAX_LEN` | 128 | party room key length |
+| `SQUAD_MAX` | `TEAM_MAX` (3) | members of a lobby squad |
+| `INVITE_TTL_S` / `INVITE_GAP_MS` / `INVITE_MAX_PENDING` | 20 / 500 / 6 | a squad invite lives this long / min gap between one player's invites / open invites per sender |
 | `MAX_PAYLOAD_BYTES` | 65536 | WebSocket message cap (larger drops the connection) |
 | `RECONNECT_SECONDS` | 20 | `allowReconnection` window |
 | `WORLD_BOUND` | 400 | max abs x and z of a pose (m) |
@@ -105,8 +107,19 @@ Game rules the server enforces; a hand-kept copy of the client's `src/config.js`
 | `tempest` | primary | 31 | 0.085 | 130 | 1.8 | |
 | `marksman` | primary | 72 | 0.32 | 260 | 2.2 | |
 | `hawk` | primary | 165 | 1.25 | 400 | 2.5 | |
-| `knife` | melee | 60 | 0.55 | 2.7 | 1 | |
-| `fists` | fists | 22 | 0.42 | 2.1 | 1 | |
+| `talon` | secondary | 68 | 0.42 | 90 | 2.2 | |
+| `wasp` | secondary | 19 | 0.058 | 60 | 1.7 | |
+| `ridgeback` | primary | 41 | 0.125 | 150 | 2 | |
+| `kestrel` | primary | 33 | 0.095 | 160 | 2 | `pierce` 0.5 |
+| `breaker` | primary | 24 | 0.3 | 22 | 1.5 | 9 pellets |
+| `cyclone` | primary | 14 | 0.28 | 24 | 1.4 | 7 pellets |
+| `ronin` | secondary | 70 | 0.6 | 3.2 | 1 | `melee` |
+| `mender` | secondary | 12 | 0.25 | 35 | 1.5 | `heal` 10 |
+| `knife` | melee | 60 | 0.55 | 2.7 | 1 | `melee` |
+| `fists` | fists | 22 | 0.42 | 2.1 | 1 | `melee` |
+
+Extra rule fields: `melee` (a blow: melee range slack, never a headshot), `pierce` (share of the vest / helmet damage cut ignored: the Kestrel's armour-piercing rounds), `heal` (HP a hit gives a teammate: the Mender's hits on allies heal instead of being refused).
+- `GRENADES` (the loadout's throwable, `onBoom`): `frag` `{ damage 170, radius 6.5, fuse 1.9 }`, `pulse` `{ 120, 8.5, 1.2 }`, `breach` `{ 230, 5, 2.4 }`.
 
 - `FALLOFF_START` 0.6 and `damageFalloff(w, dist)`: 1 up to 60% of range, then linear down to 0.6 at full range.
 - `HEALTH`: `max` 200, `regenDelay` 6 s, `regen` 4 HP/s, `regenCap` 120, `knockedHp` 80, `bleed` 5 HP/s, `reviveTime` 3 s, `reviveHp` 70, `reviveRange` 3.5 m, `vest` `[0, 0.18, 0.28, 0.38]`, `helmet` `[0, 0.22, 0.36, 0.5]`, `armorDurability` `[0, 180, 260, 340]`, `spawnProtection` 2.5 s.
@@ -119,20 +132,23 @@ Game rules the server enforces; a hand-kept copy of the client's `src/config.js`
 - `ISLAND_RADIUS` 125; `ZONE`: `start` 150, `phases` `[{at 35, shrink 30, radius 105}, {at 95, shrink 30, radius 72}, {at 160, shrink 30, radius 46}]`, `damage` `[4, 7, 11]` HP per second outside.
 - `LOOT`: `crates` 200 (accepted crate indexes), `respawn` 40 s, `airdropAt` `[70, 150]`, `airdropFall` 9 s.
 - `REWARDS`: `perElimination` 12, `perKnock` 3, `perDamage` 1/25, `win` 70, `loss` 25, `mvp` 30, `rpWin` 40, `rpLoss` -12, `rpPerElim` 3, `leavePenaltyRp` -12.
+- `GEMS` (the game's own currency, not Bloxity Gems and not premium currency: earned only by playing, never sold; spent on weapons, grenades and passes): `perElimination` 12, `perKnock` 3, `headshot` +3 on a headshot elimination, `streak` +4 per elimination past the first in a streak, counted up to `streakCap` 5 (Double +4, Triple +8, ... +16); at the results `win` 40, `loss` 15, `mvp` 25. `GEMS_MAX` 1e9.
 
 ### `src/catalog.ts`
 Prices, the profile shape and the shop logic (pure functions, no I/O).
 
-- `WEAPON_PRICES` (`slot`, `price`): striker 0, viper 0, hornet 400, thunder 1500, tempest 2500, marksman 2200, hawk 3200, knife 0, fists 0.
+- `WEAPON_PRICES` (`slot`, `price` in Gems): striker 0, viper 0, hornet 600, talon 1200, wasp 900, ridgeback 1500, kestrel 1800, tempest 2400, marksman 2200, hawk 3500, thunder 1200, breaker 1500, cyclone 2600, ronin 2500, mender 3000, knife 0, fists 0. Weapons bought with coins before the Gem store stay owned.
+- `GRENADE_PRICES` (Gems): frag 0, pulse 800, breach 1200.
+- `PASSES` (Gems): `basic` 3500 = hornet, talon, wasp, ridgeback, thunder, breaker (the client's `tier: 'basic'` weapons). A pass unlocks its set for good: `normalizeProfile` re-adds the set on every load, so weapons later added to it come with it.
 - `SKIN_PRICES`: standard 0, desert 600, jungle 900, arctic 1100, crimson 1500, neon 1800, gold 2600.
 - `OPERATIVE_PRICES`: rook 0, nova 1200, jin 1500, shade 2000.
 - `STORE` (`StoreItem[]`): upgrades (`max` 2 each) `medkits` 900, `walls` 1000, `frags` 1100, `armor` 2400; emotes `emote_dance` 500, `emote_salute` 350, `emote_flex` 650, `emote_cheer` 450 (each has `emote`: the emote id it unlocks). An upgrade's price is per level.
 - `EMOTES` `["wave","dance","salute","flex","cheer"]`; `MODES` `["clash","squad"]` (ids only; not the same export as `rules.MODES`).
-- `Profile`: `coins`, `rp`, `owned { weapons, skins, operatives, emotes }`, `loadout { primary, secondary, operative, emote, skin: Record<weapon, skin> }`, `upgrades: Record<id, level>`, `stats { matches, wins, eliminations, deaths, damage, best }`, `mode`.
-- `START_PROFILE`: 600 coins, 0 rp, owns striker/viper/knife/fists, skin standard, operative rook, emote wave, mode clash.
-- `COINS_MAX` 1e12, `RP_MAX` 1e9 (applied when a stored document is normalized, not when rewards are granted).
+- `Profile`: `coins`, `gems`, `rp`, `owned { weapons, skins, operatives, emotes }`, `loadout { primary, secondary, operative, emote, skin: Record<weapon, skin> }`, `upgrades: Record<id, level>`, `stats { matches, wins, eliminations, deaths, damage, best }`, `mode`.
+- `START_PROFILE`: 600 coins, 0 gems, 0 rp, owns striker/viper/knife/fists, skin standard, operative rook, emote wave, mode clash.
+- `COINS_MAX` 1e12, `GEMS_MAX` 1e9 (from `rules.ts`), `RP_MAX` 1e9 (applied when a stored document is normalized, not when rewards are granted).
 - `normalizeProfile(raw)`: builds a valid `Profile` from any stored document: numbers clamped and floored, unknown ids dropped, starter items always owned, equipped items must be owned and in the right slot, upgrade levels clamped to `max`, unknown `mode` falls back to `clash`. Anything it does not copy is lost on load.
-- `buy(profile, kind, id)` and `equip(profile, kind, id, weapon?)`: mutate the profile and return `null`, or an error string. `buy` kinds: `weapon`, `skin`, `operative`, `store`; errors `unknown`, `owned`, `coins`. `equip` kinds: `weapon`, `skin` (needs `weapon`), `operative`, `emote`, `mode`; errors `unknown`, `locked` (not owned), `slot` (melee/fists cannot be equipped).
+- `buy(profile, kind, id)` and `equip(profile, kind, id, weapon?)`: mutate the profile and return `null`, or an error string. `buy` kinds: `weapon`, `grenade`, `pass` (paid in Gems, `spendGems`), `skin`, `operative`, `store` (paid in coins); errors `unknown`, `owned`, `gems`, `coins`. `equip` kinds: `weapon`, `skin` (needs `weapon`), `operative`, `emote`, `grenade`, `mode`; errors `unknown`, `locked` (not owned), `slot` (melee/fists cannot be equipped).
 - `skinFor(profile, weapon)`: equipped skin or `standard`.
 
 ### `src/zone.ts`
@@ -167,7 +183,9 @@ Synced to every client by Colyseus patches every `PATCH_MS`. Server-only bookkee
 | `uid` | string | verified Bloxity user id, `""` for guests (matches chat `userId`) |
 | `avatar` | string | look JSON (ids only), `""` = default |
 | `outfitKey` | string | Bloxity outfit key |
-| `party` | string | party room key; members share a team |
+| `party` | string | Bloxity party room key; members share a team |
+| `squad` | string | in-game lobby team id (`s<n>`), `""` = solo; members queue and play together (5.4) |
+| `squadLead` | boolean | this player leads their squad: only they press Play for it |
 | `inMatch` | boolean | pressed Play (in a round or waiting for one) |
 | `team` | string | `"blue"`, `"orange"` or `""` |
 | `vote` | int8 | map index voted this round, -1 = none |
@@ -218,7 +236,7 @@ Synced to every client by Colyseus patches every `PATCH_MS`. Server-only bookkee
 
 ### State vs messages
 - State (continuous or late-join-safe): roster, looks, teams, votes, poses, health, armour levels, loadouts, scoreboard, phase, clock, scores, opened crates, drops.
-- Messages (one-off events and private data): `dmg`, `knock`, `elim`, `revive`, `spawn`, `shot`, `throw`, `boom`, `wall`, `ult`, `opened`, `openFail`, `matchEnd`, `round`, and per-client `profile`, `shop`, `rewards`, `serverError`.
+- Messages (one-off events and private data): `dmg`, `knock`, `elim`, `revive`, `spawn`, `shot`, `throw`, `boom`, `wall`, `ult`, `opened`, `openFail`, `matchEnd`, `round`, and per-client `profile`, `shop`, `rewards`, `reward`, `serverError`.
 - Never sent: armour durability, fire-rate clocks, identities other than `uid`, other players' profiles.
 
 ## 5. `MatchRoom`
@@ -240,6 +258,7 @@ Helpers used everywhere: `player(client)`, `fighting()` (phase is `playing` or `
 | `damagers` | round | attacker sessionId -> last damage time (assists) |
 | `lastHitBy` | | last enemy attacker (kill credit on bleed-out/zone) |
 | `streak`, `lastElimAt` | round | elimination streak |
+| `roundGems` | | Gems granted this round (already in `profile.gems`; reported in `rewards.gems`) |
 | `zoneTick` | s | accumulator for the once-a-second zone damage |
 | `shotSeq`, `shotAt` | wall ms | per weapon: last shot number and its time (fire rate) |
 | `throws`, `lastThrowAt` | wall ms | frags thrown and not yet exploded (max 3), last throw |
@@ -276,15 +295,16 @@ Helpers used everywhere: `player(client)`, `fighting()` (phase is `playing` or `
 1. `map` = most-voted map among ready players (random among none); `mode` = most common valid `voteMode` (fallback `clash`). `tally` breaks ties with coin flips.
 2. `duration` = the mode's (or `ROUND_SECONDS` outside production), `scoreToWin`, `round++`, `clock = 0`, scores 0, `winner = ""`.
 3. `zoneSeed` = random uint32; `zone = new Zone(zoneSeed, MAP_FOCUS[map])`; `crates` and `drops` cleared; `nextDrop = 0`.
-4. Teams: every ready player's team cleared, the list shuffled, `pickTeam` for each in turn.
+4. Teams: every ready player's team cleared, the list shuffled, then stable-sorted by `Session.lastSeat` (the last round that seated them; lowest first, so players who sat out go first), `pickTeam` for each in turn. Only the first `2 x TEAM_MAX` (6) get a team and a `resetForRound`; the rest stay `inMatch` with no team (the client keeps showing the queue panel) and are tried again next round.
 5. Phase `intro`; `resetForRound` for each (scoreboard zeroed, streak/damagers reset, `playedRound = round`, `applyLoadout`, `spawn(first = true)`); broadcast `round { round }`.
 
 `end(winner)` is ignored unless the phase is `intro`, `countdown` or `playing`. `checkTeams()` (called from `leaveMatch`): in `vote` with too few ready -> `waiting`; in a running round (not `ending`) with an empty side -> `end(the other side)`, or the score leader if both are empty.
 
 ### 5.4 Teams, parties, joining and leaving
 
-- `pickTeam(sessionId, p)`: counts current `inMatch` members per team (excluding the player). If `p.party` is set and another player with the same party key has a team with fewer than `TEAM_MAX` members, that team is returned (party beats balance). Otherwise the smaller team; equal sizes pick at random.
-- Mid-round join: `play` during a `RUNNING` phase calls `joinRound` -> `pickTeam` + `resetForRound` (a `first` spawn: full health, upgrade armour, no spawn protection). The client places itself in its team's start area. This includes `intro`, `countdown` and `ending`.
+- `pickTeam(sessionId, p)`: counts current `inMatch` members per team (excluding the player). If `p.squad` or `p.party` is set and another player of the same squad / party key has a team with fewer than `TEAM_MAX` members, that team is returned (squad and party beat balance). The first member of a squad to be seated prefers a side with room for every squad member still waiting. `startRound` orders the seating so a squad's members follow its first member. Otherwise the smaller team that still has room (equal sizes pick at random). When both teams already have `TEAM_MAX` members it returns `""`: the player is not seated.
+- Squad (lobby team, the "Players online" invites): any player can `invite` another who is not `inMatch` and not in a squad; the target answers with `inviteReply`; accepting creates the inviter's squad (`squad` = `s<n>`, inviter `squadLead`) or joins it, up to `SQUAD_MAX`. Pending invites live in `MatchRoom.invites` (expire after `INVITE_TTL_S`; dropped when either side queues or leaves). Only the leader's `play` works and it queues every member (`play` for a squad); a leaver or a disconnect goes through `removeFromSquad` (lead passes on, a squad of one dissolves); the leader can `kick` while nobody is `inMatch`. The squad survives rounds (it is a lobby team). All outcomes the players see are `squadNote` messages (protocol.md section 4); tests in `test/Squad.test.ts`.
+- Mid-round join: `play` during a `RUNNING` phase calls `joinRound` -> `pickTeam` + `resetForRound` (when `pickTeam` returns `""` both sides are full: the player stays `inMatch` with no team and waits for the next round) (a `first` spawn: full health, upgrade armour, no spawn protection). The client places itself in its team's start area. This includes `intro`, `countdown` and `ending`.
 - `play` in `waiting`, `vote` or `results` only sets `inMatch` (and `voteMode`); the player is seated at the next `startRound`.
 - `leaveMatch(sessionId)` (message `leave`, or a final disconnect): if the player has a team, the phase is `RUNNING` and `playedRound === round`, the leave penalty is granted (section 5.10). Then `inMatch = false`, `team = ""`, `life = "dead"`, `vote = -1`, emote cleared, `playedRound = -1`, and `checkTeams()`.
 
@@ -327,9 +347,9 @@ Not checked: line of sight, aim direction, ammo, reload, and that `t` was hit by
 6. Target emote cleared; broadcast `dmg`.
 7. `alive`: `hp -= dmg`; at 0, if a teammate is `alive` and the damage is not zone -> `knock`, else `eliminate`. `knocked`: `downHp -= dmg`; at 0 -> `eliminate`.
 
-`knock`: `life = "knocked"`, `downHp = HEALTH.knockedHp`, attacker `knocks++`, broadcast `knock`, `checkWipe`.
+`knock`: `life = "knocked"`, `downHp = HEALTH.knockedHp`, attacker `knocks++`, broadcast `knock`; an enemy attacker in `playing` gets `reward` (kind `knock`: `GEMS.perKnock`, coins `REWARDS.perKnock`); `checkWipe`.
 
-`eliminate`: `life = "dead"`, `deaths++`, `deadAt = clock`, victim's streak reset. Killer = the attacker if on the other team, else `lastHitBy` if still in the room and on the other team, else none. With a killer: `kills++`; streak continues if the previous elimination was within `STREAK_WINDOW`, else restarts at 1; every other damager of the victim within `ASSIST_WINDOW` on the killer's team gets `assists++`. `killer` is written to the victim's state. In `playing` the killer's team scores one point; with no killer the victim's opposing team scores (zone, falls, self-frags). Broadcast `elim`; reaching `scoreToWin` calls `end`. Eliminations in `ending` update personal stats but not the team score. Finally `checkWipe`.
+`eliminate`: `life = "dead"`, `deaths++`, `deadAt = clock`, victim's streak reset. Killer = the attacker if on the other team, else `lastHitBy` if still in the room and on the other team, else none. With a killer: `kills++`; streak continues if the previous elimination was within `STREAK_WINDOW`, else restarts at 1; every other damager of the victim within `ASSIST_WINDOW` on the killer's team gets `assists++`. `killer` is written to the victim's state. In `playing` the killer's team scores one point; with no killer the victim's opposing team scores (zone, falls, self-frags). Broadcast `elim`; then, with a killer, `reward` (kind `elim`) to the killer; reaching `scoreToWin` calls `end`. Eliminations in `ending` update personal stats but not the team score. Finally `checkWipe`.
 
 `checkWipe(team)`: when nobody on the team is `alive`, every knocked member is eliminated (credited to their `lastHitBy`).
 
@@ -350,10 +370,13 @@ Not checked: line of sight, aim direction, ammo, reload, and that `t` was hit by
   - `{ d }`: unknown, already opened or still falling -> `openFail { d }`. Otherwise `opened = true`, vest and helmet set to 3, broadcast `opened { d, by }`.
   - The server does not know crate positions; ammo and utility items inside are the client's.
 
-### 5.10 Map vote, rewards, leaving penalty
+### 5.10 Map vote, rewards, Gems, leaving penalty
+
+- `GEMS`: `perElimination` 12, `perKnock` 3, `headshot` +3, `streak` +4 per elimination past the first (up to `streakCap` 5), and at the results `win` 40, `loss` 15, `mvp` 25 (`rewardsFor` puts these in `gemsRound`; `grant` adds them; leaving a running round gets none, `leaveMatch` zeroes it).
+- Gems are granted kill by kill, not at the results: `reward(sessionId, r)` adds `r.gems` to `profile.gems` (capped at `GEMS_MAX`) and to `roundGems`, then sends the shooter `reward { k, t, gems, coins, rp, h, s, b, total }`. For an elimination `gems = perElimination + (head ? headshot : 0) + streak * (min(s, streakCap) - 1)` (`b` = that streak part; a zone death credited to the last attacker never counts as a headshot), `coins = REWARDS.perElimination`, `rp = REWARDS.rpPerElim`; for a knock `gems = perKnock`, `coins = REWARDS.perKnock`, `rp = 0`. The coins and rank points are the share this kill adds to the round's `rewards` (`rewardsFor` counts kills and knocks); they are sent so the HUD popup shows the server's numbers. Only during `playing` and only for an enemy. The Gems are saved with the next `persist` (round end, leave, final disconnect).
 
 - `vote { map, mode }` is accepted only in phase `vote` from a player with `inMatch`.
-- `rewardsFor(sessionId, p, mvpId)`: `won = p.team === state.winner`; `coins = round(kills * 12 + knocks * 3 + damage / 25 + (won ? 70 : 25) + (mvp ? 30 : 0))`; `rp = (won ? 40 : -12) + kills * 3`; plus the round's stats and final score.
+- `rewardsFor(sessionId, p, mvpId)`: `won = p.team === state.winner`; `coins = round(kills * 12 + knocks * 3 + damage / 25 + (won ? 70 : 25) + (mvp ? 30 : 0))`; `rp = (won ? 40 : -12) + kills * 3`; `gemsRound` (the round's Gems, granted by `grant`), `gems = roundGems + gemsRound` (everything the round earned, for the results screen); plus the round's stats and final score.
 - `finishRound()`: participants are players in the round with `playedRound === round`. MVP is the participant with the most kills (then damage) if they have at least one kill. Each gets `grant`, then `persist`. Then phase `results` and `flushReports()`.
 - `grant(sessionId, s, r)`: adds coins, `rp = max(0, rp + r.rp)`, `stats.matches++`, `wins`, `eliminations`, `deaths`, `damage`, `best`; sends `rewards` and `profile`; for verified identities queues leaderboard scores (`eliminations`, `weekly_elims`, `best_match`, `wins`) and stats.
 - Leaving a running round (`leaveMatch`): `rewardsFor` with no MVP, then `coins = max(0, round((coins - REWARDS.loss) * 0.5))`, `rp = min(rp, REWARDS.leavePenaltyRp)` (always -12 with the current numbers), `won = false`; granted and persisted at once. The match still counts in `stats.matches`.
@@ -364,6 +387,7 @@ Not checked: line of sight, aim direction, ammo, reload, and that `t` was hit by
 - `buy { kind, id }`: replies `shop { ok, kind, id, error }` always (`error: "loading"` before the profile is loaded); on success also `profile`, then `persist`.
 - `equip { kind, id, weapon? }`: ignored before the profile is loaded; on error replies `shop { ok: false, ... }`; on success `applyLoadout` at once when the player is not in a running round (otherwise at the next spawn), `profile`, `persist`.
 - `getProfile`: re-sends `profile` if loaded.
+- Local testing: `DEV_GEMS=<n>` (non-production only) starts a brand-new `dev-...` account with that many Gems, so the Weapons Store can be tried without playing rounds.
 - `persist(sessionId)` writes only when `loaded` and `saved(s)`. It is called after a successful `buy`/`equip`, before an identity switch (`auth`), after rewards and penalties, and on the final leave.
 - `sendProfile` payload: `{ profile, saved, userId }` (`userId` is `""` unless verified).
 
@@ -413,11 +437,14 @@ All best-effort; failures are logged or swallowed, never thrown into the room.
 |---|---|
 | waits for a second player... | `waiting` with one player, round start with two, one per team, mode vote, name |
 | checks hits... | damage number (striker 34 at 10 m), fire-rate refusal, weapon not carried, teleporting pose ignored |
-| eliminates, scores, ends the round and pays rewards | elimination without teammates, kill count, `scoreToWin`, `rewards` payload |
+| eliminates, scores, ends the round and pays rewards | elimination without teammates, kill count, `scoreToWin`, `rewards` payload, the `reward` message (headshot elimination: 7 Gems, 12 coins, 3 rp) and `rewards.gems` |
+| Gems from a kill are saved to the account... | Gems added to a saved balance, written to the fake collection on leave, sent back in `profile` on the next join |
 | knocks when a teammate is standing... | knock, revive refused without the hold, revive after `reviving` + 2.6 s |
 | a frag's blast is the server's... | `boom` refused without `throw`, blast damage at close range |
 | a second session of the same account... | close code 4100 for the older session (dev ids) |
-| shop... | `profile`, `buy` success and `coins` error, `equip` reflected in state, save in the fake collection |
+| shop: skins with coins, weapons with Gems... | `profile`, a skin bought with coins, a weapon refused with `gems` (coins never buy it), the skin `equip` reflected in state, save in the fake collection |
+| Gem shop: weapons, grenades and the pass cost Gems... | a weapon bought with Gems, the pass and a grenade refused when short, coins untouched, the pass unlocking its set, an unowned grenade refused by `equip` |
+| a medic weapon heals a teammate... | the Mender stings an enemy, heals a teammate, and a normal gun still does no friendly damage |
 | verifies the token... | faked verifier, spoofed name/id ignored, verified `outfitKey`, `avatar` updates and validation, guest carry-over, refused token = guest |
 
 Adding a test: create `test/<name>.test.ts` (matched by the glob), get the server with `await testServer()`, call `__setPlayersForTest(null)`, `__setVerifierForTest(null)` and `await colyseus.cleanup()` in `beforeEach`, use `colyseus.createRoom("match", {})` and `colyseus.connectTo(room, options)`. Poll with `until` instead of fixed sleeps where possible. Mutable rule objects (`PHASES`, `TIMING`, and the objects in `rules.ts`) can be changed with `Object.assign`; such changes are process-wide and stay for later test files. Plain constants (`RECONNECT_SECONDS`, `ULT_MIN_GAP_S`, `RESPAWN_MIN_S`, `FIRE_RATE_SLACK`) cannot be shortened; fire-rate and revive checks use real time. `room.state` can be edited directly (the tests set `scoreToWin = 1`). The `@colyseus/sdk: onMessage() not registered` lines in the test output are harmless (test clients do not register every server message).
@@ -442,7 +469,7 @@ Adding a test: create `test/<name>.test.ts` (matched by the glob), get the serve
 **Change round length, phase lengths or team size**
 - Round length/score: `rules.ts MODES` + client `MATCH_MODES`. Check `ZONE.phases` and `LOOT.airdropAt` against the new duration.
 - Phase lengths: `rules.ts PHASES` + client `MATCH` (`voteTime`, `introFlyover`, `countdown`, `endSlowmo`).
-- Team size: `TEAM_MAX` and `ROOM_MAX_CLIENTS` (= 2 x `TEAM_MAX`, literal integer, 2..100: the deploy sends it as `roomSize`), client `NET.roomSize`, `NET.teamMax` (also the party size) and `MATCH_MODES[].teamSize` / `desc`. `MIN_PLAYERS` pairs with client `NET.minPlayers`.
+- Team size: `TEAM_MAX` and `ROOM_MAX_CLIENTS` (the lobby size, independent of `TEAM_MAX`, literal integer, 2..100: the deploy sends it as `roomSize`; a round seats 2 x `TEAM_MAX`), client `NET.roomSize`, `NET.teamMax` (also the party size) and `MATCH_MODES[].teamSize` / `desc`. `MIN_PLAYERS` pairs with client `NET.minPlayers`.
 
 **Add a persisted profile field**
 1. `catalog.ts`: `Profile`, `START_PROFILE`, and `normalizeProfile` (validate and copy it; uncopied fields are dropped on load). New `stats` keys are picked up automatically from `START_PROFILE.stats`.

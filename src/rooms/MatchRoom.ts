@@ -2,12 +2,12 @@ import { Room, Client, CloseCode } from "colyseus";
 
 import { DropState, MatchState, PlayerState } from "./schema/MatchState.js";
 import {
-  AVATAR_MAX_LEN, FIRE_RATE_SLACK, GUEST_ID_PREFIX, MIN_PLAYERS, MOVE_SLACK, MAX_SPEED, NAME_MAX, PARTY_MAX_LEN, PATCH_MS,
-  PFP_MAX_LEN, RANGE_SLACK, RECONNECT_SECONDS, RESPAWN_MIN_S, REPLACED_CODE, ROOM_MAX_CLIENTS, SHOT_POINTS_MAX, TEAM_MAX, TICK_MS, TIMING, WORLD_BOUND,
+  AVATAR_MAX_LEN, FIRE_RATE_SLACK, GUEST_ID_PREFIX, INVITE_GAP_MS, INVITE_MAX_PENDING, INVITE_TTL_S, MIN_PLAYERS, MOVE_SLACK, MAX_SPEED, NAME_MAX, PARTY_MAX_LEN, PATCH_MS,
+  PFP_MAX_LEN, RANGE_SLACK, RECONNECT_SECONDS, RESPAWN_MIN_S, REPLACED_CODE, ROOM_MAX_CLIENTS, SHOT_POINTS_MAX, SQUAD_MAX, TEAM_MAX, TICK_MS, TIMING, WORLD_BOUND,
 } from "../constants.js";
 import {
-  ASSIST_WINDOW, HEALTH, ITEMS, JIN_HEAL, LOOT, MAP_COUNT, MAP_FOCUS, MODES, OPERATIVES, PHASES, REWARDS, ROOK_DAMAGE_TAKEN, STREAK_WINDOW,
-  ULT_MIN_GAP_S, WEAPONS, damageFalloff,
+  ASSIST_WINDOW, GEMS, GRENADES, HEALTH, ITEMS, JIN_HEAL, LOOT, MAP_COUNT, MAP_FOCUS, MODES, OPERATIVES, PHASES, REWARDS, ROOK_DAMAGE_TAKEN, STREAK_WINDOW,
+  ULT_MIN_GAP_S, WEAPONS, GEMS_MAX, damageFalloff,
 } from "../rules.js";
 import { Zone } from "../zone.js";
 import { buy, equip, normalizeProfile, skinFor, type Profile } from "../catalog.js";
@@ -32,10 +32,12 @@ interface Session {
   lastHitBy: string;
   streak: number;
   lastElimAt: number;
+  roundGems: number; // Gems granted this round (already in the profile; shown in `rewards`)
   zoneTick: number;
   shotSeq: Map<string, number>; // weapon -> last shot sequence number
   shotAt: Map<string, number>; // weapon -> ms of that shot
   throws: number; // frags thrown and not yet exploded
+  throwKind: string; // the grenade type of the last throw (GRENADES)
   lastThrowAt: number; // ms
   lastHealAt: number; // ms
   lastUltAt: number; // ms
@@ -46,6 +48,16 @@ interface Session {
   graceUntil: number; // ms: poses may jump (spawn / respawn teleports)
   emoteAt: number; // ms
   playedRound: number; // round index this player fought in (rewards, leave penalty)
+  lastSeat: number; // the last round that seated this player (not reset at the end): sat-out players get seats first
+  lastInviteAt: number; // ms of the last squad invite sent
+}
+
+// A pending squad invite (from the lobby's "Players online" list), answered by `inviteReply`.
+interface Invite {
+  id: number;
+  from: string; // sessionId
+  to: string; // sessionId
+  expires: number; // ms
 }
 
 const str = (v: unknown, max: number) => (typeof v === "string" ? v.slice(0, max) : "");
@@ -72,17 +84,28 @@ export class MatchRoom extends Room<{ state: MatchState }> {
   private zone = new Zone(1);
   private nextDrop = 0;
   private dropId = 1;
+  private invites = new Map<number, Invite>();
+  private inviteSeq = 1;
+  private squadSeq = 1;
 
   messages = {
     // --- Lobby -----------------------------------------------------------------------------------
-    // Pressed Play: { mode } is the player's preferred mode for the next vote.
+    // Pressed Play: { mode } is the player's preferred mode for the next vote. A squad (lobby team)
+    // plays together: only its leader presses Play and every member is queued with them.
     play: (client: Client, msg: { mode?: unknown }) => {
       const p = this.player(client);
-      if (!p || p.inMatch) return;
-      p.inMatch = true;
-      p.voteMode = typeof msg?.mode === "string" && msg.mode in MODES ? msg.mode : "";
-      p.vote = -1;
-      if (RUNNING.has(this.state.phase)) this.joinRound(client.sessionId, p);
+      if (!p) return;
+      if (p.squad && !p.squadLead) return this.tell(client.sessionId, "squadNote", { kind: "notLeader" });
+      if (p.inMatch && !p.squad) return;
+      const mode = typeof msg?.mode === "string" && msg.mode in MODES ? msg.mode : "";
+      for (const [sid, m] of p.squad ? this.squadOf(p.squad) : [[client.sessionId, p] as [string, PlayerState]]) {
+        if (m.inMatch) continue;
+        m.inMatch = true;
+        m.voteMode = mode;
+        m.vote = -1;
+        this.dropInvitesOf(sid); // queued players can neither send nor answer invites
+        if (RUNNING.has(this.state.phase)) this.joinRound(sid, m);
+      }
     },
     // The client is ready for its profile (also sent unasked once loaded).
     getProfile: (client: Client) => {
@@ -90,7 +113,32 @@ export class MatchRoom extends Room<{ state: MatchState }> {
       if (s?.loaded) this.sendProfile(client, s);
     },
     // Back to the menus. Leaving a running round costs half the coins and some rank.
-    leave: (client: Client) => this.leaveMatch(client.sessionId),
+    // A squad that is only queued (no seat yet) leaves the queue together: the leader decided to queue.
+    leave: (client: Client) => {
+      const p = this.player(client);
+      const group = p?.squad && p.inMatch && !p.team ? this.squadOf(p.squad).map(([sid]) => sid) : [client.sessionId];
+      for (const sid of group) this.leaveMatch(sid);
+    },
+
+    // --- Squad (the lobby team: up to SQUAD_MAX players who queue and play together) ---------------
+    // Invite another player in the room: { to: sessionId }. They answer with `inviteReply`.
+    invite: (client: Client, msg: { to?: unknown }) => this.onInvite(client.sessionId, typeof msg?.to === "string" ? msg.to : ""),
+    inviteReply: (client: Client, msg: { id?: unknown; accept?: unknown }) => this.onInviteReply(client.sessionId, num(msg?.id), msg?.accept === true),
+    // Leave the squad (and the queue, if the squad was queued).
+    leaveSquad: (client: Client) => {
+      const p = this.player(client);
+      if (!p?.squad) return;
+      if (p.inMatch && !p.team) this.leaveMatch(client.sessionId);
+      this.removeFromSquad(client.sessionId, "left");
+    },
+    // The leader removes a member (not while queued or fighting): { t: sessionId }.
+    kick: (client: Client, msg: { t?: unknown }) => {
+      const p = this.player(client);
+      const tid = typeof msg?.t === "string" ? msg.t : "";
+      const t = this.state.players.get(tid);
+      if (!p?.squad || !p.squadLead || !t || tid === client.sessionId || t.squad !== p.squad || p.inMatch || t.inMatch) return;
+      this.removeFromSquad(tid, "kicked");
+    },
     vote: (client: Client, msg: { map?: unknown; mode?: unknown }) => {
       const p = this.player(client);
       if (!p || !p.inMatch || this.state.phase !== "vote") return;
@@ -218,8 +266,10 @@ export class MatchRoom extends Room<{ state: MatchState }> {
       if (now - s.lastThrowAt < 400) return;
       s.lastThrowAt = now;
       s.throws = Math.min(s.throws + 1, 3);
+      // The grenade type is the loadout's (an unowned or unknown kind throws a frag).
+      s.throwKind = s.profile.loadout.grenade in GRENADES ? s.profile.loadout.grenade : "frag";
       const v = (a: any) => (Array.isArray(a) && a.length === 3 && a.every((n: unknown) => num(n) !== null) ? a : null);
-      if (v(msg?.p) && v(msg?.v)) this.broadcast("throw", { id: client.sessionId, p: msg.p, v: msg.v }, { except: client });
+      if (v(msg?.p) && v(msg?.v)) this.broadcast("throw", { id: client.sessionId, p: msg.p, v: msg.v, k: s.throwKind }, { except: client });
     },
     // The thrower's frag went off: { x, y, z, t: [sessionIds in the blast with line of sight] }.
     boom: (client: Client, msg: any) => this.onBoom(client.sessionId, msg),
@@ -375,10 +425,12 @@ export class MatchRoom extends Room<{ state: MatchState }> {
       lastHitBy: "",
       streak: 0,
       lastElimAt: -99,
+      roundGems: 0,
       zoneTick: 0,
       shotSeq: new Map(),
       shotAt: new Map(),
       throws: 0,
+      throwKind: "frag",
       lastThrowAt: 0,
       lastHealAt: 0,
       lastUltAt: 0,
@@ -389,6 +441,8 @@ export class MatchRoom extends Room<{ state: MatchState }> {
       graceUntil: Date.now() + TIMING.joinGraceMs,
       emoteAt: 0,
       playedRound: -1,
+      lastSeat: -1,
+      lastInviteAt: 0,
     };
     this.sessions.set(client.sessionId, s);
     this.evictOthers(client.sessionId, s.identity);
@@ -412,6 +466,8 @@ export class MatchRoom extends Room<{ state: MatchState }> {
       }
     }
     this.leaveMatch(client.sessionId);
+    this.removeFromSquad(client.sessionId, "left");
+    this.dropInvitesOf(client.sessionId);
     await this.persist(client.sessionId);
     this.state.players.delete(client.sessionId);
     this.sessions.delete(client.sessionId);
@@ -474,6 +530,10 @@ export class MatchRoom extends Room<{ state: MatchState }> {
         if (this.sessions.get(client.sessionId) !== s || s.identity !== identity) return;
         s.profile = r.profile;
         s.loaded = true;
+        // Local testing only: DEV_GEMS gives a brand-new dev account (dev-...) a Gem balance so the
+        // Weapons Store can be tried without playing rounds first. Never in production.
+        const devGems = process.env.NODE_ENV !== "production" && s.dev ? Number(process.env.DEV_GEMS) : 0;
+        if (!r.found && !r.carried && devGems > 0) s.profile.gems = Math.min(devGems, 1e6);
         if (r.carried) await saveProfile(identity.userId, identity.username, s.profile);
       } catch (err) {
         console.warn("[MatchRoom] loadProfile failed", err);
@@ -521,16 +581,136 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     }
   }
 
+  // --- Squad (lobby team) ---------------------------------------------------------------------------
+  private tell(sessionId: string, type: string, msg: unknown) {
+    try {
+      this.clients.find((c) => c.sessionId === sessionId)?.send(type, msg);
+    } catch {
+      // Gone meanwhile.
+    }
+  }
+
+  // Members of a squad: [[sessionId, PlayerState], ...] in room order.
+  private squadOf(id: string): [string, PlayerState][] {
+    return id ? [...this.state.players.entries()].filter(([, p]) => p.squad === id) : [];
+  }
+
+  private onInvite(fromId: string, toId: string) {
+    const p = this.state.players.get(fromId);
+    const s = this.sessions.get(fromId);
+    const t = this.state.players.get(toId);
+    if (!p || !s || !t || fromId === toId) return;
+    const now = Date.now();
+    if (now - s.lastInviteAt < INVITE_GAP_MS) return;
+    s.lastInviteAt = now;
+    if (p.inMatch) return this.tell(fromId, "squadNote", { kind: "youBusy" });
+    if (t.inMatch) return this.tell(fromId, "squadNote", { kind: "busy", name: t.name }); // in a round or the queue: cannot view invitations
+    if (t.squad) return this.tell(fromId, "squadNote", { kind: t.squad === p.squad ? "sameTeam" : "inTeam", name: t.name });
+    if (p.squad && this.squadOf(p.squad).length >= SQUAD_MAX) return this.tell(fromId, "squadNote", { kind: "full" });
+    let pending = 0;
+    for (const inv of this.invites.values()) {
+      if (inv.from !== fromId) continue;
+      if (inv.to === toId) return this.tell(fromId, "squadNote", { kind: "dup", name: t.name });
+      pending++;
+    }
+    if (pending >= INVITE_MAX_PENDING) return;
+    const inv: Invite = { id: this.inviteSeq++, from: fromId, to: toId, expires: now + INVITE_TTL_S * 1000 };
+    this.invites.set(inv.id, inv);
+    this.tell(toId, "invite", { id: inv.id, from: fromId, name: p.name, pfp: p.pfp, size: p.squad ? this.squadOf(p.squad).length : 1, ttl: INVITE_TTL_S });
+    this.tell(fromId, "squadNote", { kind: "sent", name: t.name });
+  }
+
+  private onInviteReply(toId: string, id: number | null, accept: boolean) {
+    const inv = id !== null ? this.invites.get(id) : undefined;
+    if (!inv || inv.to !== toId) return;
+    this.invites.delete(inv.id);
+    const t = this.state.players.get(toId);
+    const p = this.state.players.get(inv.from);
+    if (!t) return;
+    if (!accept) return this.tell(inv.from, "squadNote", { kind: "declined", name: t.name });
+    if (!p || p.inMatch || t.inMatch) return this.tell(toId, "squadNote", { kind: "gone" });
+    if (t.squad) return this.tell(toId, "squadNote", { kind: "youInTeam" });
+    if (p.squad && this.squadOf(p.squad).length >= SQUAD_MAX) {
+      this.tell(toId, "squadNote", { kind: "teamFull" });
+      return this.tell(inv.from, "squadNote", { kind: "full" });
+    }
+    if (!p.squad) {
+      p.squad = "s" + this.squadSeq++;
+      p.squadLead = true;
+    }
+    t.squad = p.squad;
+    t.squadLead = false;
+    for (const [sid] of this.squadOf(p.squad)) {
+      if (sid !== toId) this.tell(sid, "squadNote", { kind: "joined", name: t.name });
+    }
+    this.tell(toId, "squadNote", { kind: "welcome", name: p.name });
+    for (const o of [...this.invites.values()]) if (o.to === toId) this.invites.delete(o.id); // answered by joining
+  }
+
+  // Drops this player out of their squad: a squad of one dissolves, a leaving leader hands over.
+  private removeFromSquad(sessionId: string, why: "left" | "kicked") {
+    const p = this.state.players.get(sessionId);
+    if (!p?.squad) return;
+    const id = p.squad;
+    const wasLead = p.squadLead;
+    p.squad = "";
+    p.squadLead = false;
+    const rest = this.squadOf(id);
+    if (why === "kicked") this.tell(sessionId, "squadNote", { kind: "youKicked" });
+    if (rest.length < 2) {
+      for (const [sid, r] of rest) {
+        r.squad = "";
+        r.squadLead = false;
+        this.tell(sid, "squadNote", { kind: "disbanded", name: p.name });
+      }
+      return;
+    }
+    if (wasLead) {
+      rest[0][1].squadLead = true;
+      this.tell(rest[0][0], "squadNote", { kind: "leader" });
+    }
+    for (const [sid] of rest) this.tell(sid, "squadNote", { kind: why, name: p.name });
+  }
+
+  // Invites this player sent or was sent end (they queued, or left the room).
+  private dropInvitesOf(sessionId: string) {
+    for (const inv of [...this.invites.values()]) {
+      if (inv.from !== sessionId && inv.to !== sessionId) continue;
+      this.invites.delete(inv.id);
+      this.tell(inv.to, "inviteEnd", { id: inv.id });
+    }
+  }
+
+  private expireInvites(now: number) {
+    for (const inv of [...this.invites.values()]) {
+      if (now < inv.expires) continue;
+      this.invites.delete(inv.id);
+      this.tell(inv.to, "inviteEnd", { id: inv.id });
+      this.tell(inv.from, "squadNote", { kind: "expired", name: this.state.players.get(inv.to)?.name ?? "" });
+    }
+  }
+
   // --- Teams + rounds -------------------------------------------------------------------------------
-  private pickTeam(sessionId: string, p: PlayerState): Team {
+  // The side for a player, or "" when both sides are full (TEAM_MAX each): they wait for the next round.
+  private pickTeam(sessionId: string, p: PlayerState): Team | "" {
     const count = { blue: 0, orange: 0 };
     for (const [sid, o] of this.state.players) if (sid !== sessionId && o.inMatch && (o.team === "blue" || o.team === "orange")) count[o.team as Team]++;
-    // Party members play together when their team has room.
-    if (p.party) {
+    // Squad (lobby team) and Bloxity party members play together when their team has room.
+    if (p.squad || p.party) {
       for (const [sid, o] of this.state.players) {
-        if (sid !== sessionId && o.party === p.party && (o.team === "blue" || o.team === "orange") && count[o.team as Team] < TEAM_MAX) return o.team as Team;
+        const mate = (p.squad && o.squad === p.squad) || (p.party && o.party === p.party);
+        if (sid !== sessionId && mate && (o.team === "blue" || o.team === "orange") && count[o.team as Team] < TEAM_MAX) return o.team as Team;
       }
     }
+    let open = TEAMS.filter((t) => count[t] < TEAM_MAX);
+    if (!open.length) return "";
+    // The first of a squad to be seated takes a side with room for all of them still waiting.
+    if (p.squad) {
+      const need = this.squadOf(p.squad).filter(([sid, o]) => o.inMatch && (sid === sessionId || !o.team)).length;
+      const roomy = open.filter((t) => TEAM_MAX - count[t] >= need);
+      if (roomy.length) open = roomy;
+    }
+    if (open.length === 1) return open[0];
     if (count.blue === count.orange) return Math.random() < 0.5 ? "blue" : "orange";
     return count.blue < count.orange ? "blue" : "orange";
   }
@@ -540,8 +720,9 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     p.damage = 0;
     s.streak = 0;
     s.lastElimAt = -99;
+    s.roundGems = 0;
     s.damagers.clear();
-    s.playedRound = this.state.round;
+    s.playedRound = s.lastSeat = this.state.round;
     this.applyLoadout(p, s);
     this.spawn(sessionId, p, s, true);
   }
@@ -578,7 +759,9 @@ export class MatchRoom extends Room<{ state: MatchState }> {
   private joinRound(sessionId: string, p: PlayerState) {
     const s = this.sessions.get(sessionId);
     if (!s) return;
-    p.team = this.pickTeam(sessionId, p);
+    const team = this.pickTeam(sessionId, p);
+    if (!team) return; // both sides full: stays in the queue (inMatch, no team) until the next round
+    p.team = team;
     this.resetForRound(sessionId, p, s);
   }
 
@@ -591,6 +774,8 @@ export class MatchRoom extends Room<{ state: MatchState }> {
       // Half of what the player earned by fighting; no participation coins (join-and-leave farming).
       r.coins = Math.max(0, Math.round((r.coins - REWARDS.loss) * 0.5));
       r.rp = Math.min(r.rp, REWARDS.leavePenaltyRp);
+      r.gems -= r.gemsRound; // no round Gems for leaving (the kills' Gems stay)
+      r.gemsRound = 0;
       r.won = false;
       this.grant(sessionId, s, r);
       void this.persist(sessionId);
@@ -647,9 +832,28 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     this.nextDrop = 0;
     // Teams: shuffle, keep parties together, balance.
     for (const [, p] of ready) p.team = "";
-    for (const [sid, p] of ready.sort(() => Math.random() - 0.5)) p.team = this.pickTeam(sid, p);
+    // Shuffle, then those who sat out the last round go first; whoever does not fit waits.
+    const seat = (sid: string) => this.sessions.get(sid)?.lastSeat ?? -1;
+    ready.sort(() => Math.random() - 0.5);
+    ready.sort(([a], [b]) => seat(a) - seat(b)); // longest without a seat first
+    // A squad is seated together: its members follow its first member in the order.
+    const order: typeof ready = [];
+    const placed = new Set<string>();
+    for (const e of ready) {
+      if (placed.has(e[0])) continue;
+      placed.add(e[0]);
+      order.push(e);
+      if (!e[1].squad) continue;
+      for (const o of ready) {
+        if (placed.has(o[0]) || o[1].squad !== e[1].squad) continue;
+        placed.add(o[0]);
+        order.push(o);
+      }
+    }
+    for (const [sid, p] of order) p.team = this.pickTeam(sid, p);
     this.setPhase("intro", PHASES.intro);
     for (const [sid, p] of ready) {
+      if (!p.team) continue;
       const s = this.sessions.get(sid);
       if (s) this.resetForRound(sid, p, s);
     }
@@ -685,6 +889,7 @@ export class MatchRoom extends Room<{ state: MatchState }> {
       const s = this.sessions.get(sid);
       if (p.emote && s && now - s.emoteAt > 6000) p.emote = "";
     }
+    if (this.invites.size) this.expireInvites(now);
     switch (st.phase) {
       case "waiting":
         if (this.ready() >= MIN_PLAYERS) this.startVote();
@@ -776,7 +981,9 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     const w = typeof msg?.w === "string" ? msg.w : "";
     const rule = WEAPONS[w];
     if (!a || !s || !t || !rule || tid === sessionId || !this.fighting()) return;
-    if (a.life !== "alive" || !a.team || t.life === "dead" || !t.team || t.team === a.team || !this.carries(a, w)) return;
+    if (a.life !== "alive" || !a.team || t.life === "dead" || !t.team || !this.carries(a, w)) return;
+    const ally = t.team === a.team;
+    if (ally && !rule.heal) return;
     // Fire rate: a new shot number must wait the weapon's interval (one shot may hit several players).
     const seq = num(msg.s) ?? -1;
     const now = Date.now();
@@ -788,27 +995,37 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     }
     // Range, against where the server last saw both players.
     const dist = Math.hypot(t.x - a.x, t.y - a.y, t.z - a.z);
-    const melee = rule.slot === "melee" || rule.slot === "fists";
+    const melee = !!rule.melee;
     if (dist > rule.range + (melee ? 2.5 : RANGE_SLACK)) return;
     const pellets = rule.pellets ?? 1;
     const n = clampN(Math.floor(num(msg.n) ?? 1), 1, pellets);
+    // A medic weapon's hit on a teammate heals: HP while standing, the bleed-out pool while knocked
+    // (it does not revive). Spawn-protected or not, an ally can always be healed.
+    if (ally) {
+      const heal = rule.heal! * n;
+      if (t.life === "alive") t.hp = Math.min(HEALTH.max, t.hp + heal);
+      else if (t.life === "knocked") t.downHp = Math.min(HEALTH.knockedHp, t.downHp + heal);
+      this.broadcast("healed", { t: tid, a: sessionId, n: heal });
+      return;
+    }
     const h = melee ? 0 : clampN(Math.floor(num(msg.h) ?? 0), 0, n);
     const d = clampN(num(msg.d) ?? dist, 0, rule.range);
     const fall = melee ? 1 : damageFalloff(rule, d);
     const amount = rule.damage * fall * ((n - h) + h * rule.headMul);
-    this.applyDamage(tid, amount, sessionId, { head: h > 0, weapon: w });
+    this.applyDamage(tid, amount, sessionId, { head: h > 0, weapon: w, pierce: rule.pierce });
   }
 
   private onBoom(sessionId: string, msg: any) {
     const a = this.state.players.get(sessionId);
     const s = this.sessions.get(sessionId);
-    if (!a || !s || !this.fighting() || s.throws <= 0 || Date.now() - s.lastThrowAt > (ITEMS.frag.fuse + 3) * 1000) return;
+    const g = GRENADES[s?.throwKind ?? "frag"] ?? GRENADES.frag;
+    if (!a || !s || !this.fighting() || s.throws <= 0 || Date.now() - s.lastThrowAt > (g.fuse + 3) * 1000) return;
     const x = num(msg?.x), y = num(msg?.y), z = num(msg?.z);
     if (x === null || y === null || z === null || Math.hypot(x - a.x, z - a.z) > 60) return;
     s.throws--;
     this.broadcast("boom", { id: sessionId, x, y, z }, { except: this.clients.find((c) => c.sessionId === sessionId) });
     const targets: string[] = Array.isArray(msg?.t) ? msg.t.filter((v: unknown) => typeof v === "string").slice(0, ROOM_MAX_CLIENTS) : [];
-    const R = ITEMS.frag.radius;
+    const R = g.radius;
     for (const tid of new Set(targets)) {
       const t = this.state.players.get(tid);
       if (!t || t.life === "dead" || !t.team) continue;
@@ -816,13 +1033,13 @@ export class MatchRoom extends Room<{ state: MatchState }> {
       const dist = Math.hypot(t.x - x, t.y + 1 - y, t.z - z);
       if (dist > R + 2) continue;
       const k = Math.pow(1 - Math.min(dist, R) / R, 0.7);
-      const dmg = ITEMS.frag.damage * k * (tid === sessionId ? 0.5 : 1);
+      const dmg = g.damage * k * (tid === sessionId ? 0.5 : 1);
       if (dmg > 0.5) this.applyDamage(tid, dmg, sessionId, { explosive: true, weapon: "frag" });
     }
   }
 
   // Armour, knock-down and elimination, as the client's combat.js once did it locally.
-  private applyDamage(targetId: string, amount: number, attackerId: string | null, opts: { head?: boolean; zone?: boolean; explosive?: boolean; weapon?: string }) {
+  private applyDamage(targetId: string, amount: number, attackerId: string | null, opts: { head?: boolean; zone?: boolean; explosive?: boolean; weapon?: string; pierce?: number }) {
     const st = this.state;
     const t = st.players.get(targetId);
     const ts = this.sessions.get(targetId);
@@ -832,13 +1049,14 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     let dmg = amount;
     if (t.operative === "rook" && st.clock < t.ultUntil) dmg *= ROOK_DAMAGE_TAKEN;
     if (t.life === "alive" && !opts.zone) {
+      const keep = 1 - clampN(opts.pierce ?? 0, 0, 1); // armour-piercing rounds ignore part of the cut
       if (opts.head && t.helmet > 0) {
-        const cut = dmg * HEALTH.helmet[t.helmet];
+        const cut = dmg * HEALTH.helmet[t.helmet] * keep;
         dmg -= cut;
         ts.helmetDur -= cut;
         if (ts.helmetDur <= 0) this.setArmor(t, ts, "helmet", t.helmet - 1);
       } else if (!opts.head && t.vest > 0) {
-        const cut = dmg * HEALTH.vest[t.vest];
+        const cut = dmg * HEALTH.vest[t.vest] * keep;
         dmg -= cut;
         ts.vestDur -= cut;
         if (ts.vestDur <= 0) this.setArmor(t, ts, "vest", t.vest - 1);
@@ -878,6 +1096,9 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     const a = attackerId ? this.state.players.get(attackerId) : undefined;
     if (a && attackerId !== targetId) a.knocks++;
     this.broadcast("knock", { t: targetId, a: attackerId ?? "", w: opts.weapon ?? "", h: !!opts.head });
+    if (a && attackerId !== targetId && a.team !== t.team && this.state.phase === "playing") {
+      this.reward(attackerId!, { k: "knock", t: targetId, gems: GEMS.perKnock, coins: REWARDS.perKnock, rp: 0, h: !!opts.head, s: 0, b: 0 });
+    }
     this.checkWipe(t.team);
   }
 
@@ -918,6 +1139,12 @@ export class MatchRoom extends Room<{ state: MatchState }> {
       const scorer: Team = k ? (k.team as Team) : t.team === "blue" ? "orange" : "blue";
       st[scorer]++;
       this.broadcast("elim", { t: targetId, k: killerId, w: opts.weapon ?? (opts.zone ? "zone" : opts.explosive ? "frag" : ""), h: !!opts.head, s: streak });
+      if (k && ks) {
+        const head = !!opts.head && !opts.zone;
+        const bonus = GEMS.streak * (Math.min(streak, GEMS.streakCap) - 1);
+        const gems = GEMS.perElimination + (head ? GEMS.headshot : 0) + bonus;
+        this.reward(killerId, { k: "elim", t: targetId, gems, coins: REWARDS.perElimination, rp: REWARDS.rpPerElim, h: head, s: streak, b: bonus });
+      }
       if (st[scorer] >= st.scoreToWin) this.end(scorer);
     } else {
       this.broadcast("elim", { t: targetId, k: killerId, w: opts.weapon ?? "", h: !!opts.head, s: streak });
@@ -934,16 +1161,36 @@ export class MatchRoom extends Room<{ state: MatchState }> {
   }
 
   // --- Rewards ------------------------------------------------------------------------------------------
+  // A knock or elimination by `sessionId`: Gems go into the profile now (saved with the next
+  // persist: round end, leave, disconnect); the coins and rank points shown are what this kill adds
+  // to the round's `rewards` (rewardsFor counts kills / knocks). The shooter's popup shows these.
+  private reward(sessionId: string, r: { k: "elim" | "knock"; t: string; gems: number; coins: number; rp: number; h: boolean; s: number; b: number }) {
+    const s = this.sessions.get(sessionId);
+    if (!s) return;
+    s.profile.gems = Math.min(GEMS_MAX, s.profile.gems + r.gems);
+    s.roundGems += r.gems;
+    const client = this.clients.find((c) => c.sessionId === sessionId);
+    try {
+      client?.send("reward", { ...r, total: s.profile.gems });
+    } catch {
+      // Gone meanwhile.
+    }
+  }
+
   private rewardsFor(sessionId: string, p: PlayerState, mvpId: string | null) {
     const won = p.team === this.state.winner;
     const mvp = mvpId === sessionId;
     const coins = Math.round(p.kills * REWARDS.perElimination + p.knocks * REWARDS.perKnock + p.damage * REWARDS.perDamage + (won ? REWARDS.win : REWARDS.loss) + (mvp ? REWARDS.mvp : 0));
     const rp = (won ? REWARDS.rpWin : REWARDS.rpLoss) + p.kills * REWARDS.rpPerElim;
+    // Gems: the kills' share was granted kill by kill (reward); the round's share is granted here.
+    const gemsRound = (won ? GEMS.win : GEMS.loss) + (mvp ? GEMS.mvp : 0);
     return {
       won,
       mvp,
       coins,
       rp,
+      gems: (this.sessions.get(sessionId)?.roundGems ?? 0) + gemsRound, // everything this round earned
+      gemsRound,
       eliminations: p.kills,
       knocks: p.knocks,
       assists: p.assists,
@@ -957,6 +1204,7 @@ export class MatchRoom extends Room<{ state: MatchState }> {
   private grant(sessionId: string, s: Session, r: ReturnType<MatchRoom["rewardsFor"]>) {
     const pr = s.profile;
     pr.coins += r.coins;
+    pr.gems = Math.min(GEMS_MAX, pr.gems + r.gemsRound);
     pr.rp = Math.max(0, pr.rp + r.rp);
     pr.stats.matches++;
     if (r.won) pr.stats.wins++;
