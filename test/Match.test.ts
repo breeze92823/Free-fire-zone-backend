@@ -52,13 +52,13 @@ describe("match room", () => {
     assert.strictEqual(pa.name, "Ann");
   });
 
-  it("seats 3 v 3: the others who pressed Play wait, and sit first next round", async () => {
-    const { room, clients } = await startRound(colyseus, 8, [], 8);
+  it("seats 5 v 5: the others who pressed Play wait, and sit first next round", async () => {
+    const { room, clients } = await startRound(colyseus, 12, [], 12);
     const teams = (id: string) => room.state.players.get(id)!.team;
     const seated = () => clients.filter((c) => teams(c.sessionId));
-    assert.strictEqual(seated().length, 6, "a round seats 6");
-    assert.strictEqual(seated().filter((c) => teams(c.sessionId) === "blue").length, 3);
-    assert.strictEqual(seated().filter((c) => teams(c.sessionId) === "orange").length, 3);
+    assert.strictEqual(seated().length, 10, "a round seats 10");
+    assert.strictEqual(seated().filter((c) => teams(c.sessionId) === "blue").length, 5);
+    assert.strictEqual(seated().filter((c) => teams(c.sessionId) === "orange").length, 5);
     const waiting = clients.filter((c) => !teams(c.sessionId)).map((c) => c.sessionId);
     assert.strictEqual(waiting.length, 2);
     for (const id of waiting) assert.ok(room.state.players.get(id)!.inMatch, "queued, not sent to the menus");
@@ -68,10 +68,10 @@ describe("match room", () => {
     for (const id of waiting) assert.ok(teams(id), "players who sat out are seated first");
   });
 
-  it("a room is exactly a round's seats, so nobody queues: the 7th player is sent elsewhere", async () => {
+  it("a room is exactly a round's seats, so nobody queues: the 11th player is sent elsewhere", async () => {
     const room = await colyseus.createRoom<MatchState>("match", {});
-    for (let i = 0; i < 6; i++) await colyseus.connectTo(room, { name: `P${i}` });
-    await assert.rejects(() => colyseus.connectTo(room, { name: "P6" }), /locked|full/i);
+    for (let i = 0; i < 10; i++) await colyseus.connectTo(room, { name: `P${i}` });
+    await assert.rejects(() => colyseus.connectTo(room, { name: "P10" }), /locked|full/i);
   });
 
   it("checks hits: rate, team, range; armour and damage are the server's", async () => {
