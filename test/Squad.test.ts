@@ -4,7 +4,7 @@ import type { ColyseusTestServer } from "@colyseus/testing";
 import type appConfig from "../src/app.config.js";
 import type { MatchState } from "../src/rooms/schema/MatchState.js";
 import { PHASES } from "../src/rules.js";
-import { INVITE_GAP_MS, TIMING } from "../src/constants.js";
+import { INVITE_GAP_MS, SQUAD_MAX, TIMING } from "../src/constants.js";
 import { __setPlayersForTest } from "../src/db.js";
 import { __setVerifierForTest } from "../src/auth.js";
 import { sleep, until } from "./fakePlayers.js";
@@ -62,20 +62,21 @@ describe("squad (lobby team)", () => {
     const room = await colyseus.createRoom<MatchState>("match", {});
     const a = await join(colyseus, room, "Ann");
     const b = await join(colyseus, room, "Bo");
-    const c = await join(colyseus, room, "Cy");
+    // Fill the squad to SQUAD_MAX: Ann, Bo and the rest; Di is one too many.
+    const rest = [];
+    for (let i = 2; i < SQUAD_MAX; i++) rest.push(await join(colyseus, room, `M${i}`));
     const d = await join(colyseus, room, "Di");
     const invite = async (from: any, to: any) => {
       await sleep(INVITE_GAP_MS + 50);
       from.send("invite", { to: to.sessionId });
     };
-    await invite(a, b);
-    await until(() => b.invites.length === 1);
-    b.send("inviteReply", { id: b.invites[0].id, accept: true });
-    await invite(a, c);
-    await until(() => c.invites.length === 1);
-    c.send("inviteReply", { id: c.invites[0].id, accept: true });
     const pa = room.state.players.get(a.sessionId)!;
-    await until(() => room.state.players.get(c.sessionId)!.squad === pa.squad, 1000, "three in the squad");
+    for (const m of [b, ...rest]) {
+      await invite(a, m);
+      await until(() => m.invites.length === 1);
+      m.send("inviteReply", { id: m.invites[0].id, accept: true });
+      await until(() => !!pa.squad && room.state.players.get(m.sessionId)!.squad === pa.squad, 1000, "joined the squad");
+    }
     await invite(a, d);
     await until(() => a.notes.some((n: any) => n.kind === "full"), 1000, "full team");
     assert.strictEqual(d.invites.length, 0);
@@ -114,9 +115,9 @@ describe("squad (lobby team)", () => {
       const room = await colyseus.createRoom<MatchState>("match", {});
       const a = await join(colyseus, room, "Ann");
       const b = await join(colyseus, room, "Bo");
-      // Six players fill both sides (3 + 3), so the squad's side always gets exactly one solo.
+      // Ten players fill both sides (5 + 5), so the squad's side always gets exactly three solos.
       const solos = [];
-      for (const n of ["S1", "S2", "S3", "S4"]) solos.push(await join(colyseus, room, n));
+      for (const n of ["S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8"]) solos.push(await join(colyseus, room, n));
       a.send("invite", { to: b.sessionId });
       await until(() => b.invites.length === 1);
       b.send("inviteReply", { id: b.invites[0].id, accept: true });
@@ -132,7 +133,7 @@ describe("squad (lobby team)", () => {
       await until(() => room.state.phase === "playing", 5000, "playing");
       assert.ok(pa.team && pa.team === pb.team, "the squad shares a team");
       const sameSide = solos.filter((s) => room.state.players.get(s.sessionId)!.team === pa.team).length;
-      assert.strictEqual(sameSide, 1, "3 per side: one solo joins the squad's side");
+      assert.strictEqual(sameSide, 3, "5 per side: three solos join the squad's side");
     } finally {
       PHASES.vote = voteWas;
     }

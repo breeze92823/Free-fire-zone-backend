@@ -3,11 +3,11 @@
 // Connections per room (the deploy reads this number as `roomSize`): the lobby holds up to this many.
 // Kept equal to a round's seats (2 x TEAM_MAX) so nobody waits in a queue: when a room is full the
 // matchmaker sends the next player to another room. Keep it a literal integer (the deploy greps it).
-export const ROOM_MAX_CLIENTS = 6;
-// Players per side in a round; a round seats MATCH_MAX = 2 x TEAM_MAX (6). With a room of 6
+export const ROOM_MAX_CLIENTS = 10;
+// Players per side in a round; a round seats MATCH_MAX = 2 x TEAM_MAX (10). With a room of 10
 // everyone fits; if the room is ever larger, players who pressed Play beyond the seats wait in the
 // queue for the next round (those who sat out go first).
-export const TEAM_MAX = 3;
+export const TEAM_MAX = 5;
 // A round needs this many players who pressed Play; fewer and the room waits.
 export const MIN_PLAYERS = 2;
 // The in-game team (lobby squad): up to a whole side. Invites from the lobby's "Players online" list
@@ -15,7 +15,7 @@ export const MIN_PLAYERS = 2;
 export const SQUAD_MAX = TEAM_MAX;
 export const INVITE_TTL_S = 20;
 export const INVITE_GAP_MS = 500;
-export const INVITE_MAX_PENDING = 6;
+export const INVITE_MAX_PENDING = 10;
 
 // The room's simulation step (zone, regen, bleed-out, timers). Patches go out at patchRate.
 export const TICK_MS = 50;

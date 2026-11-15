@@ -6,7 +6,7 @@ Everything here was written from the source in `src/`, `test/`, the build/deploy
 
 ## 1. Model in one page
 
-- One room type, `match` (`MatchRoom`). A room holds up to `ROOM_MAX_CLIENTS` (6) connections (the lobby) = a round's seats, two teams of `TEAM_MAX` (3), so the matchmaker opens another room instead of queueing players. The queue still exists as a fallback (e.g. an odd squad split that fits neither side): players who pressed Play without a seat wait (`inMatch`, no team) and are seated first next round (`Session.lastSeat`). Real players only.
+- One room type, `match` (`MatchRoom`). A room holds up to `ROOM_MAX_CLIENTS` (10) connections (the lobby) = a round's seats, two teams of `TEAM_MAX` (5), so the matchmaker opens another room instead of queueing players. The queue still exists as a fallback (e.g. an odd squad split that fits neither side): players who pressed Play without a seat wait (`inMatch`, no team) and are seated first next round (`Session.lastSeat`). Real players only.
 - Everyone who joins is "in the menus" (`inMatch = false`, `life = "dead"`, no team). `play` sets `inMatch`. A round needs `MIN_PLAYERS` (2) players with `inMatch`.
 - Rounds run in the same room forever: `waiting -> vote -> intro -> countdown -> playing -> ending -> results -> vote | waiting`.
 - Authority split:
@@ -69,16 +69,16 @@ Server limits and timings (rules shared with the client are in `rules.ts` / `cat
 
 | Constant | Value | Use |
 |---|---|---|
-| `ROOM_MAX_CLIENTS` | 6 | `maxClients` (lobby size, not round size); deploy `roomSize`; cap on `boom` targets |
-| `TEAM_MAX` | 3 | seats per side in a round (round = 6); `pickTeam` returns `""` when both are full |
+| `ROOM_MAX_CLIENTS` | 10 | `maxClients` (lobby size, not round size); deploy `roomSize`; cap on `boom` targets |
+| `TEAM_MAX` | 5 | seats per side in a round (round = 10); `pickTeam` returns `""` when both are full |
 | `MIN_PLAYERS` | 2 | players with `inMatch` needed for a vote/round |
 | `TICK_MS` / `PATCH_MS` | 50 / 50 | simulation interval / state patch rate |
 | `NAME_MAX` | 32 | display name length |
 | `PFP_MAX_LEN` | 512 | profile picture URL length (must be `http(s)://`) |
 | `AVATAR_MAX_LEN` | 4000 | look JSON length |
 | `PARTY_MAX_LEN` | 128 | party room key length |
-| `SQUAD_MAX` | `TEAM_MAX` (3) | members of a lobby squad |
-| `INVITE_TTL_S` / `INVITE_GAP_MS` / `INVITE_MAX_PENDING` | 20 / 500 / 6 | a squad invite lives this long / min gap between one player's invites / open invites per sender |
+| `SQUAD_MAX` | `TEAM_MAX` (5) | members of a lobby squad |
+| `INVITE_TTL_S` / `INVITE_GAP_MS` / `INVITE_MAX_PENDING` | 20 / 500 / 10 | a squad invite lives this long / min gap between one player's invites / open invites per sender |
 | `MAX_PAYLOAD_BYTES` | 65536 | WebSocket message cap (larger drops the connection) |
 | `RECONNECT_SECONDS` | 20 | `allowReconnection` window |
 | `WORLD_BOUND` | 400 | max abs x and z of a pose (m) |
@@ -308,7 +308,7 @@ Helpers used everywhere: `player(client)`, `fighting()` (phase is `playing` or `
 1. `map` = most-voted map among ready players (random among none); `mode` = most common valid `voteMode` (fallback `clash`). `tally` breaks ties with coin flips.
 2. `duration` = the mode's (or `ROUND_SECONDS` outside production), `scoreToWin`, `round++`, `clock = 0`, scores 0, `winner = ""`.
 3. `zoneSeed` = random uint32; `zone = new Zone(zoneSeed, MAPS[map].focus, MAPS[map].world)` (that world's plan and land radius); `vehicles.spawn(world)` (5.9b); `crates` and `drops` cleared; `nextDrop = 0`. Crate indexes are per world (each client builds the voted world's list); `LOOT.crates` 200 bounds them for every world (Coral Key has 52, Dustline Ridge 60).
-4. Teams: every ready player's team cleared, the list shuffled, then stable-sorted by `Session.lastSeat` (the last round that seated them; lowest first, so players who sat out go first), `pickTeam` for each in turn. Only the first `2 x TEAM_MAX` (6) get a team and a `resetForRound`; the rest stay `inMatch` with no team (the client keeps showing the queue panel) and are tried again next round.
+4. Teams: every ready player's team cleared, the list shuffled, then stable-sorted by `Session.lastSeat` (the last round that seated them; lowest first, so players who sat out go first), `pickTeam` for each in turn. Only the first `2 x TEAM_MAX` (10) get a team and a `resetForRound`; the rest stay `inMatch` with no team (the client keeps showing the queue panel) and are tried again next round.
 5. Phase `intro`; `resetForRound` for each (scoreboard zeroed, streak/damagers reset, `playedRound = round`, `applyLoadout`, `spawn(first = true)`); broadcast `round { round }`.
 
 `end(winner)` is ignored unless the phase is `intro`, `countdown` or `playing`. `checkTeams()` (called from `leaveMatch`): in `vote` with too few ready -> `waiting`; in a running round (not `ending`) with an empty side -> `end(the other side)`, or the score leader if both are empty.
