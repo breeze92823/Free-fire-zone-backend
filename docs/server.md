@@ -65,7 +65,7 @@ Entry point. `await connectDb()`, `await listen(app)`, then `installReporters()`
 Default export: the Colyseus server from `defineServer`. `WebSocketTransport({ maxPayload: MAX_PAYLOAD_BYTES })`; rooms `{ match: defineRoom(MatchRoom) }` (no `filterBy`, so `joinOrCreate` takes any open public room); Express: `GET /health` returns 200 (Legion probe), CORS with `CLIENT_ORIGIN || "*"`, and outside production `/monitor` and the playground at `/`.
 
 ### `src/constants.ts`
-Server limits and timings (rules shared with the client are in `rules.ts` / `catalog.ts`).
+Server limits and timings (rules shared with the client are in `rules.ts` / `catalog.ts`). Also `ID_PATTERN_USER` (an inviter id in `inv`) and `OFFER_POLL_MS` (4000: the least gap between `offerPoll` answers); `rules.ts` holds `FRIEND_OFFER` (section 5.14).
 
 | Constant | Value | Use |
 |---|---|---|
@@ -451,6 +451,14 @@ Seated players' own poses (`pose`) are checked against the vehicle limit instead
 - `newsSeen { id }`: the lobby's "new arrivals" window was closed; sets `profile.newsSeen = id` when it is an integer above the stored value and at most `NEWS_MAX` (only ever moves forward), then persists. Test: `Arsenal.test.ts`.
 - Missions count whatever a round grants, so the round-reward weaknesses in section 12 (a forfeit win, `play` during `ending`) also advance `win` / `play` missions.
 - Tests: `test/Progress.test.ts` (rollover, counting, claim, forged data, rank pay-out, a round that finishes missions and a rank, a claim, `tutorialDone`).
+
+### 5.14 Friend invite offer (`rules.ts FRIEND_OFFER`, `MatchRoom.openOffer` / `syncOffer`)
+Invite `need` (2) NEW players with your link inside `hours` (48) and `weapon` (`bulldog`, the Bulldog Drum SMG) is added to your owned weapons for free. Earned, never sold or bought.
+- Profile `offer { start, seen, claimed, by, at }` (`FriendOffer`, normalised in `catalog.ts`): `start` (ms) opens the account's window the first time the account loads (`openOffer`, so existing players get one too); `seen` = the lobby popup was closed (`offerSeen`); `claimed` = the weapon was granted; `by` / `at` = the account whose link brought this one in and when.
+- Attribution: the client sends the inviter's id (`inv` join option, or `inv` in the `auth` message after a mid-session sign-in; `ID_PATTERN_USER`) -> `Session.inviter`. `openOffer` credits it only when the account is brand-new (`loadProfile` `found` false), the inviter is not itself and `offer.by` is empty: it writes `offer.by` / `offer.at` on the NEW account's own save at once. So a friend who already had an account, a rejoin, a guest or a forged id never counts, and nothing is written to the inviter's document (no cross-session overwrite).
+- Progress: `db.ts countInvited(inviterId, from, to)` counts player documents with `offer.by = inviter` and `offer.at` inside the inviter's window (`start` .. `start + hours`); an index on `offer.by` / `offer.at` is created in `connectDb`. `syncOffer` (after every profile load, and for `offerPoll`) counts, and once `joined >= need` and not `claimed` it pushes the weapon into `owned.weapons`, sets `claimed`, persists, re-sends `profile` and answers `inviteOffer { granted: true }`. It still pays when the inviter was offline for the last join (the join times are what the window checks, not the claim time). `Session.offerBusy` stops two syncs overlapping.
+- Limits: a guest (no verified or dev id) has no offer (`me: ""`); `OFFER_POLL_MS` rate-limits `offerPoll`. A farmed second account still counts as a new player (Bloxity verifies tokens, so one real account per user).
+- Tests: `test/Offer.test.ts` (window, new vs existing vs self, one grant, joins after the window, popup flag, forged id).
 
 ### 5.12 Single-session enforcement (`evictOthers`, close code 4100)
 

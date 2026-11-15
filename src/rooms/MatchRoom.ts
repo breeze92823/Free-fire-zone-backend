@@ -3,16 +3,16 @@ import { Room, Client, CloseCode } from "colyseus";
 import { DropState, MatchState, PlayerState } from "./schema/MatchState.js";
 import {
   AVATAR_MAX_LEN, FIRE_RATE_SLACK, GUEST_ID_PREFIX, HEART_GAP_MS, HEARTS_PER_TARGET, INVITE_GAP_MS, INVITE_MAX_PENDING, INVITE_TTL_S, MIN_PLAYERS, MOVE_SLACK, MAX_SPEED, VEHICLE_MAX_SPEED, VEHICLE_SLACK, NAME_MAX, PARTY_MAX_LEN, PATCH_MS,
-  PFP_MAX_LEN, PROFILE_GAP_MS, RANGE_SLACK, REACT_GAP_MS, RECONNECT_SECONDS, RESPAWN_MIN_S, REPLACED_CODE, ROOM_MAX_CLIENTS, SHOT_POINTS_MAX, SQUAD_MAX, TEAM_MAX, TICK_MS, TIMING, WORLD_BOUND,
+  ID_PATTERN_USER, OFFER_POLL_MS, PFP_MAX_LEN, PROFILE_GAP_MS, RANGE_SLACK, REACT_GAP_MS, RECONNECT_SECONDS, RESPAWN_MIN_S, REPLACED_CODE, ROOM_MAX_CLIENTS, SHOT_POINTS_MAX, SQUAD_MAX, TEAM_MAX, TICK_MS, TIMING, WORLD_BOUND,
 } from "../constants.js";
 import {
   ASSIST_WINDOW, FIRE_TICK, GEMS, GRENADES, HEALTH, ITEMS, JIN_HEAL, LOOT, MAP_COUNT, MAPS, MODES, OPERATIVES, PAN_BEHIND_COS, PHASES, REACTIONS, REWARDS, ROOK_DAMAGE_TAKEN,
-  STREAK_WINDOW, ULT_MIN_GAP_S, WEAPONS, GEMS_MAX, MOUNTS, VEHICLE_DAMAGE, damageFalloff, levelOf, type WeaponRule,
+  FRIEND_OFFER, STREAK_WINDOW, ULT_MIN_GAP_S, WEAPONS, GEMS_MAX, MOUNTS, VEHICLE_DAMAGE, damageFalloff, levelOf, type WeaponRule,
 } from "../rules.js";
 import { Zone } from "../zone.js";
 import { Vehicles } from "../vehicles.js";
 import { NEWS_MAX, buy, equip, normalizeProfile, skinFor, type Profile } from "../catalog.js";
-import { loadProfile, saveProfile } from "../db.js";
+import { countInvited, loadProfile, saveProfile } from "../db.js";
 import { claimMission, countRound, payRankUps, refreshMissions } from "../progress.js";
 import { OUTFIT_KEY, reportId, verifyToken, type Identity } from "../auth.js";
 import { flushReports, queueScores, queueStats } from "../reporters.js";
@@ -63,6 +63,9 @@ interface Session {
   roundWrecks: number; // vehicles this player destroyed this round (missions)
   roundRams: number; // enemies this player ran over this round (missions)
   profileAt: number; // ms of the last public profile request
+  inviter: string; // the account whose invite link this player arrived with ("" = none), claimed once the account loads
+  offerAt: number; // ms of the last friend offer sync (rate limit)
+  offerBusy: boolean; // a friend offer sync is running
 }
 
 // A burning Firebottle patch: who started it, where, how hot and until when (round clock).
@@ -87,6 +90,8 @@ interface Invite {
   expires: number; // ms
 }
 
+// The inviter's id from a join option / `auth` message: only a plausible user id.
+const inviterId = (v: unknown) => (typeof v === "string" && ID_PATTERN_USER.test(v) ? v : "");
 const str = (v: unknown, max: number) => (typeof v === "string" ? v.slice(0, max) : "");
 const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
 const pfpOk = (v: unknown) => (typeof v === "string" && v.length <= PFP_MAX_LEN && /^https?:\/\//i.test(v) ? v : "");
@@ -242,7 +247,7 @@ export class MatchRoom extends Room<{ state: MatchState }> {
       s.emoteAt = Date.now();
     },
     // Sign-in / sign-out mid-session: re-verify and switch the saved profile.
-    auth: async (client: Client, msg: { token?: unknown; name?: unknown; pfp?: unknown }) => {
+    auth: async (client: Client, msg: { token?: unknown; name?: unknown; pfp?: unknown; inv?: unknown }) => {
       const p = this.player(client);
       const s = this.sessions.get(client.sessionId);
       if (!p || !s) return;
@@ -255,6 +260,7 @@ export class MatchRoom extends Room<{ state: MatchState }> {
       await this.persist(client.sessionId);
       s.identity = identity;
       s.dev = false;
+      if (inviterId(msg?.inv)) s.inviter = inviterId(msg.inv);
       p.name = identity.username.slice(0, NAME_MAX) || "Player";
       p.pfp = pfpOk(identity.pfp) || p.pfp;
       p.signedIn = identity.verified;
@@ -302,6 +308,20 @@ export class MatchRoom extends Room<{ state: MatchState }> {
       if (!s?.loaded || id === null || !Number.isInteger(id) || id <= s.profile.newsSeen || id > NEWS_MAX) return;
       s.profile.newsSeen = id;
       await this.persist(client.sessionId);
+    },
+    // The friend invite offer popup was closed (any way): not shown again on this account.
+    offerSeen: async (client: Client) => {
+      const s = this.sessions.get(client.sessionId);
+      if (!s?.loaded || s.profile.offer.seen) return;
+      s.profile.offer.seen = true;
+      await this.persist(client.sessionId);
+    },
+    // The lobby asks for the offer's progress (friends joined, time left); answered with `inviteOffer`.
+    // At most one answer per OFFER_POLL_MS: the count is a database query.
+    offerPoll: async (client: Client) => {
+      const s = this.sessions.get(client.sessionId);
+      if (!s?.loaded || Date.now() - s.offerAt < OFFER_POLL_MS) return;
+      await this.syncOffer(client, s);
     },
     equip: async (client: Client, msg: { kind?: unknown; id?: unknown; weapon?: unknown }) => {
       const s = this.sessions.get(client.sessionId);
@@ -605,6 +625,9 @@ export class MatchRoom extends Room<{ state: MatchState }> {
       heartsGiven: new Map(),
       reactAt: 0,
       profileAt: 0,
+      inviter: inviterId(options?.inv),
+      offerAt: 0,
+      offerBusy: false,
     };
     this.sessions.set(client.sessionId, s);
     this.evictOthers(client.sessionId, s.identity);
@@ -721,6 +744,7 @@ export class MatchRoom extends Room<{ state: MatchState }> {
         const devGems = process.env.NODE_ENV !== "production" && s.dev ? Number(process.env.DEV_GEMS) : 0;
         if (!r.found && !r.carried && devGems > 0) s.profile.gems = Math.min(devGems, 1e6);
         if (r.carried) await saveProfile(identity.userId, identity.username, s.profile);
+        await this.openOffer(s, r.found);
       } catch (err) {
         console.warn("[MatchRoom] loadProfile failed", err);
         if (this.sessions.get(client.sessionId) !== s) return;
@@ -732,6 +756,63 @@ export class MatchRoom extends Room<{ state: MatchState }> {
     if (p && (!RUNNING.has(this.state.phase) || !p.team)) this.applyLoadout(p, s);
     if (p) this.applyPublic(p, s);
     this.sendProfile(client, s);
+    if (s.loaded) void this.syncOffer(client, s);
+  }
+
+  // --- Friend invite offer (rules.ts FRIEND_OFFER) --------------------------------------------------
+  // First load of an account: its offer window opens now. A brand-new account (nothing stored yet) that
+  // arrived through someone's invite link (join option `inv`, never itself) is credited to that
+  // inviter, once; the join time lands on this account's own save, which the inviter's count reads.
+  private async openOffer(s: Session, found: boolean) {
+    if (!this.saved(s)) return;
+    const o = s.profile.offer;
+    let dirty = false;
+    if (!o.start) {
+      o.start = Date.now();
+      dirty = true;
+    }
+    if (!found && !o.by && s.inviter && s.inviter !== s.identity.userId) {
+      o.by = s.inviter;
+      o.at = Date.now();
+      dirty = true;
+    }
+    if (dirty) await saveProfile(s.identity.userId, s.identity.username, s.profile);
+  }
+
+  // Counts the friends this player brought in, grants the reward once enough joined inside the window
+  // (even if this account was offline when the last one came), and tells the client the state.
+  private async syncOffer(client: Client, s: Session) {
+    if (s.offerBusy || !this.sessions.has(client.sessionId)) return;
+    s.offerBusy = true;
+    try {
+      const o = s.profile.offer;
+      const saved = this.saved(s);
+      s.offerAt = Date.now();
+      const end = o.start + FRIEND_OFFER.hours * 3600e3;
+      const joined = saved && o.start ? await countInvited(s.identity.userId, o.start, end) : 0;
+      let granted = false;
+      if (saved && !o.claimed && joined >= FRIEND_OFFER.need) {
+        o.claimed = true;
+        if (!s.profile.owned.weapons.includes(FRIEND_OFFER.weapon)) s.profile.owned.weapons.push(FRIEND_OFFER.weapon);
+        granted = true;
+        await this.persist(client.sessionId);
+        this.sendProfile(client, s);
+      }
+      this.tell(client.sessionId, "inviteOffer", {
+        me: saved ? s.identity.userId : "",
+        joined: Math.min(joined, FRIEND_OFFER.need),
+        need: FRIEND_OFFER.need,
+        weapon: FRIEND_OFFER.weapon,
+        start: o.start,
+        end,
+        now: Date.now(),
+        seen: o.seen,
+        claimed: o.claimed,
+        granted,
+      });
+    } finally {
+      s.offerBusy = false;
+    }
   }
 
   // The profile's public face in the room state: level (career stats) and rank points.

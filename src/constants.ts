@@ -21,6 +21,9 @@ export const INVITE_MAX_PENDING = 10;
 export const TICK_MS = 50;
 export const PATCH_MS = 50;
 
+// The lobby may ask for the friend offer's progress this often (ms): the count is a database query.
+export const OFFER_POLL_MS = 4000;
+
 // Longest accepted strings.
 export const NAME_MAX = 32;
 export const PFP_MAX_LEN = 512;
@@ -62,6 +65,9 @@ export const REPLACED_CODE = 4100;
 
 // Ids from the client's catalogs: lowercase slugs.
 export const ID_PATTERN = /^[a-z0-9_:-]{1,40}$/;
+
+// A user id in an invite link (?inv=): Bloxity ids and local dev ids. Anything else is ignored.
+export const ID_PATTERN_USER = /^[A-Za-z0-9_-]{1,64}$/;
 
 // Players with no verified Bloxity token get a server-made id with this prefix; they are never
 // saved or reported.

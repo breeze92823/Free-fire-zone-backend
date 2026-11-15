@@ -29,6 +29,8 @@ export async function connectDb(): Promise<void> {
     await client.connect();
     // No dbName passed to .db() -- the injected URI already points at this game+channel's database.
     players = client.db().collection<PlayerDoc>("players");
+    // The friend invite offer counts the accounts an inviter brought in (saveProfile writes offer.by / offer.at).
+    await players.createIndex({ "offer.by": 1, "offer.at": 1 }, { sparse: true }).catch((err) => console.warn("[db] index failed", err));
     console.log("[db] connected to MongoDB");
   } catch (err) {
     console.warn("[db] connect failed -- player progress will not persist:", err);
@@ -81,5 +83,18 @@ export async function saveProfile(userId: string, username: string, profile: Pro
   } catch (err) {
     console.warn("[db] saveProfile failed", err);
     return false;
+  }
+}
+
+// How many accounts joined through `inviterId`'s invite link between two moments (ms, inclusive):
+// the friend invite offer's progress. 0 when Mongo is unset or errors.
+export async function countInvited(inviterId: string, from: number, to: number): Promise<number> {
+  const col = getPlayers();
+  if (!col || !inviterId) return 0;
+  try {
+    return await col.countDocuments({ "offer.by": inviterId, "offer.at": { $gte: from, $lte: to } });
+  } catch (err) {
+    console.warn("[db] countInvited failed", err);
+    return 0;
   }
 }

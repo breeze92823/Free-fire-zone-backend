@@ -1,4 +1,5 @@
 import { GEMS_MAX } from "./rules.js";
+import { ID_PATTERN_USER } from "./constants.js";
 import { RANKS, emptyMissions, normalizeMissions, rankOf, type Missions } from "./progress.js";
 
 // Shop prices and the starting profile: a copy of the client's src/config.js WEAPONS / SKINS /
@@ -99,6 +100,19 @@ export interface Profile {
   rankReward: number; // highest RANKS index whose one-time reward was paid
   tutorial: boolean; // the first-round tips were finished (or skipped)
   newsSeen: number; // the newest lobby announcement (client config.js NEWS.id) the player has closed
+  offer: FriendOffer; // the friend invite offer (rules.ts FRIEND_OFFER)
+}
+
+// The friend invite offer's state on this account. `start` (ms) is when its window opened (0 = not yet:
+// the server sets it the first time the account loads), `seen` = the lobby popup was closed, `claimed` =
+// the reward was granted, `by` / `at` = the account whose link brought this one in and when (only a
+// brand-new account can be brought in, once).
+export interface FriendOffer {
+  start: number;
+  seen: boolean;
+  claimed: boolean;
+  by: string;
+  at: number;
 }
 
 export const START_PROFILE: Profile = {
@@ -114,6 +128,7 @@ export const START_PROFILE: Profile = {
   rankReward: 0,
   tutorial: false,
   newsSeen: 0,
+  offer: { start: 0, seen: false, claimed: false, by: "", at: 0 },
 };
 
 export const COINS_MAX = 1e12;
@@ -167,6 +182,16 @@ export function normalizeProfile(raw: any): Profile {
   // Players who already finished a round before the tips existed do not get them.
   p.tutorial = raw.tutorial === true || (raw.tutorial === undefined && p.stats.matches > 0);
   p.newsSeen = num(raw.newsSeen, NEWS_MAX);
+  const o = raw.offer;
+  if (o && typeof o === "object") {
+    p.offer = {
+      start: num(o.start, 1e15),
+      seen: o.seen === true,
+      claimed: o.claimed === true,
+      by: typeof o.by === "string" && ID_PATTERN_USER.test(o.by) ? o.by : "",
+      at: num(o.at, 1e15),
+    };
+  }
   return p;
 }
 
