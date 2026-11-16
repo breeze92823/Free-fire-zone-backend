@@ -290,3 +290,8 @@ export function levelOf(stats: { matches: number; wins: number; eliminations: nu
 
 // Spectator reactions (`react`): ids only, the client draws them (config.js REACTIONS).
 export const REACTIONS = ["laugh", "fire", "clap", "wow", "gg"] as const;
+
+// Friend invite offer (client config.js FRIEND_OFFER): every account gets a `hours`-long window from the
+// first time the server sees it; when `need` NEW accounts join through its invite link inside that
+// window, `weapon` is added to the inviter's owned weapons for free. Never bought, never a premium item.
+export const FRIEND_OFFER = { weapon: "bulldog", need: 2, hours: 48 };

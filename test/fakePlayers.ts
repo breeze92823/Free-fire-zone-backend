@@ -21,6 +21,11 @@ export function fakePlayers(seed: Partial<PlayerDoc>[] = []) {
     async findOne(filter: { _id: string }) {
       return docs.get(filter._id) ?? null;
     },
+    // The friend invite offer's count: { "offer.by": id, "offer.at": { $gte, $lte } }.
+    async countDocuments(filter: any) {
+      const range = filter["offer.at"] ?? {};
+      return [...docs.values()].filter((d) => d.offer?.by === filter["offer.by"] && d.offer.at >= (range.$gte ?? 0) && d.offer.at <= (range.$lte ?? Infinity)).length;
+    },
     async updateOne(filter: { _id: string }, update: any, options: any) {
       const existing = docs.get(filter._id);
       if (!existing && !options?.upsert) return { modifiedCount: 0 };
