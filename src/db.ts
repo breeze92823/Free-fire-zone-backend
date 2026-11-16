@@ -86,11 +86,40 @@ export async function saveProfile(userId: string, username: string, profile: Pro
   }
 }
 
+// Friend invite offer without Mongo (a plain local `npm start`): nothing is saved, so the offer
+// would never count a join and its window would restart on every load. This process-lifetime copy
+// keeps each account's window start and who was brought in by whom, for local testing only (a
+// real deploy always has Mongo, which keeps the same facts on the player documents).
+const memStarts = new Map<string, number>();
+const memJoins = new Map<string, { by: string; at: number }>(); // joiner -> credited inviter
+
+// The moment an account's offer window opened: now, or (no Mongo) the first time this process saw it.
+export function offerStartFor(userId: string): number {
+  if (getPlayers()) return Date.now();
+  let t = memStarts.get(userId);
+  if (!t) memStarts.set(userId, (t = Date.now()));
+  return t;
+}
+
+// No Mongo: credit `joiner` to `inviter` once. Returns false when this joiner was already credited.
+export function recordMemInvite(inviter: string, joiner: string, at: number): boolean {
+  if (getPlayers() || memJoins.has(joiner)) return false;
+  memJoins.set(joiner, { by: inviter, at });
+  return true;
+}
+
+// Test-only seam: forget the in-memory offer data.
+export function __resetOfferMemoryForTest(): void {
+  memStarts.clear();
+  memJoins.clear();
+}
+
 // How many accounts joined through `inviterId`'s invite link between two moments (ms, inclusive):
-// the friend invite offer's progress. 0 when Mongo is unset or errors.
+// the friend invite offer's progress. 0 when Mongo errors.
 export async function countInvited(inviterId: string, from: number, to: number): Promise<number> {
   const col = getPlayers();
-  if (!col || !inviterId) return 0;
+  if (!inviterId) return 0;
+  if (!col) return [...memJoins.values()].filter((j) => j.by === inviterId && j.at >= from && j.at <= to).length;
   try {
     return await col.countDocuments({ "offer.by": inviterId, "offer.at": { $gte: from, $lte: to } });
   } catch (err) {
