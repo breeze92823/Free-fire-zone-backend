@@ -3,11 +3,11 @@ import type { ColyseusTestServer } from "@colyseus/testing";
 
 import type appConfig from "../src/app.config.js";
 import type { MatchState } from "../src/rooms/schema/MatchState.js";
-import { __setPlayersForTest } from "../src/db.js";
+import { __resetOfferMemoryForTest, __setPlayersForTest } from "../src/db.js";
 import { __setVerifierForTest } from "../src/auth.js";
 import { normalizeProfile } from "../src/catalog.js";
 import { FRIEND_OFFER } from "../src/rules.js";
-import { fakePlayers, until } from "./fakePlayers.js";
+import { fakePlayers, sleep, until } from "./fakePlayers.js";
 import { testServer } from "./server.js";
 
 // Friend invite offer: two NEW accounts through an invite link = the Bulldog Drum, free.
@@ -96,6 +96,26 @@ describe("friend invite offer", () => {
     late.c.send("offerSeen");
     await until(() => late.s().profile.offer.seen === true, 2000, "seen");
     assert.strictEqual(db.docs.get("dev-late1").offer.seen, true);
+  });
+
+  it("counts joins without Mongo too (local testing), keeping the window across reloads", async () => {
+    __setPlayersForTest(null);
+    __resetOfferMemoryForTest();
+    const room = await colyseus.createRoom<MatchState>("match", {});
+    const host = await join(room, "dev-nodbhost");
+    await until(() => host.s().loaded && host.s().profile.offer.start > 0, 2000, "window opened");
+    const start = host.s().profile.offer.start;
+    await sleep(30);
+    await join(room, "dev-nodbf1", "dev-nodbhost");
+    await join(room, "dev-nodbf2", "dev-nodbhost");
+    await sleep(100);
+    host.poll();
+    await until(() => host.msgs.some((m) => m.granted), 2000, "reward without a database");
+    assert.strictEqual(host.s().profile.owned.weapons.includes("bulldog"), true);
+    // The host reloads: same window start, nothing counted twice.
+    const again = await join(room, "dev-nodbhost");
+    await until(() => again.s().loaded && again.s().profile.offer.start > 0, 2000, "reloaded");
+    assert.strictEqual(again.s().profile.offer.start, start);
   });
 
   it("ignores a forged inviter id and never credits guests", async () => {

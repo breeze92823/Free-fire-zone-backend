@@ -12,7 +12,7 @@ import {
 import { Zone } from "../zone.js";
 import { Vehicles } from "../vehicles.js";
 import { NEWS_MAX, buy, equip, normalizeProfile, skinFor, type Profile } from "../catalog.js";
-import { countInvited, loadProfile, saveProfile } from "../db.js";
+import { countInvited, getPlayers, loadProfile, offerStartFor, recordMemInvite, saveProfile } from "../db.js";
 import { claimMission, countRound, payRankUps, refreshMissions } from "../progress.js";
 import { OUTFIT_KEY, reportId, verifyToken, type Identity } from "../auth.js";
 import { flushReports, queueScores, queueStats } from "../reporters.js";
@@ -764,17 +764,32 @@ export class MatchRoom extends Room<{ state: MatchState }> {
   // arrived through someone's invite link (join option `inv`, never itself) is credited to that
   // inviter, once; the join time lands on this account's own save, which the inviter's count reads.
   private async openOffer(s: Session, found: boolean) {
-    if (!this.saved(s)) return;
+    if (!this.saved(s)) {
+      if (s.inviter) console.info(`[offer] ${s.identity.userId} via ${s.inviter}: not counted (not signed in; counted if they sign in)`);
+      return;
+    }
     const o = s.profile.offer;
     let dirty = false;
     if (!o.start) {
-      o.start = Date.now();
+      o.start = offerStartFor(s.identity.userId);
       dirty = true;
     }
-    if (!found && !o.by && s.inviter && s.inviter !== s.identity.userId) {
-      o.by = s.inviter;
-      o.at = Date.now();
-      dirty = true;
+    if (s.inviter) {
+      // Say why a join through a link was or was not counted (the usual "it did not count" question).
+      const who = `${s.identity.userId} via ${s.inviter}`;
+      if (s.inviter === s.identity.userId) console.info(`[offer] ${who}: not counted (own link)`);
+      else if (o.by) console.info(`[offer] ${who}: not counted (already invited by ${o.by})`);
+      else if (getPlayers() && found) console.info(`[offer] ${who}: not counted (this account already existed; only brand-new accounts count)`);
+      else {
+        const at = Date.now();
+        // With Mongo the credit lives on this new account's own save; without it, in memory (local testing).
+        if (getPlayers() || recordMemInvite(s.inviter, s.identity.userId, at)) {
+          o.by = s.inviter;
+          o.at = at;
+          dirty = true;
+          console.info(`[offer] ${who}: counted`);
+        } else console.info(`[offer] ${who}: not counted (already credited)`);
+      }
     }
     if (dirty) await saveProfile(s.identity.userId, s.identity.username, s.profile);
   }
